@@ -1,17 +1,249 @@
 :root {
   font-family: Poppins, ui-sans-serif, system-ui, sans-serif;
-  color-scheme: light dark;
+
+  --board-bg: #efe9dd;
+  --panel-bg: #e4dccc;
+  --panel-bg-deep: #d9cfba;
+  --ink: #3c3227;
+  --ink-dim: #6b5a42;
+  --edge: rgba(90, 74, 52, 0.25);
+  --edge-soft: rgba(90, 74, 52, 0.14);
+  --accent: #c2410c;
+  --accent-soft: rgba(194, 122, 42, 0.18);
 }
 
 * { box-sizing: border-box; }
 
-html, body, #root { height: 100%; margin: 0; }
-
-.app-shell {
-  display: flex;
+html, body, #root {
   height: 100%;
-  align-items: center;
-  justify-content: center;
+  margin: 0;
+  overflow: hidden;
 }
 
-.app-placeholder { opacity: 0.5; font-weight: 500; }
+body {
+  background: var(--board-bg);
+  color: var(--ink);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+
+button, input, select {
+  font: inherit;
+  color: inherit;
+}
+
+/* --- app shell --- */
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 232px 1fr;
+  grid-template-rows: 50px 1fr auto;
+  grid-template-areas:
+    "transport transport"
+    "layers    board"
+    "layers    lane";
+  height: 100%;
+}
+
+.app-transport { grid-area: transport; }
+.app-layers    { grid-area: layers; min-height: 0; }
+.app-board     { grid-area: board; min-height: 0; position: relative; }
+.app-lane      { grid-area: lane; }
+
+.app-layers {
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--edge);
+  background: var(--panel-bg);
+  overflow: hidden;
+}
+
+/* --- board surfaces --- */
+
+.board-view {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-rows: auto 1fr;
+  height: 100%;
+  min-height: 0;
+  background: var(--board-bg);
+}
+
+.board-corner {
+  background: var(--panel-bg);
+  border-right: 1px solid var(--edge);
+  border-bottom: 1px solid var(--edge);
+}
+
+.board-ruler {
+  display: block;
+  width: 100%;
+  border-bottom: 1px solid var(--edge);
+  cursor: text;
+  touch-action: none;
+}
+
+.board-gutter {
+  display: block;
+  height: 100%;
+  border-right: 1px solid var(--edge);
+  touch-action: none;
+}
+
+.board-stage {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+}
+
+.board-main,
+.board-overlay {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.board-main {
+  /* §7.3 event hygiene: no long-press callout, no text selection, no scroll chaining. */
+  touch-action: none;
+  user-select: none;
+  cursor: crosshair;
+}
+
+.board-overlay {
+  pointer-events: none;
+}
+
+/* --- subdivision editor --- */
+
+.subdiv-menu {
+  position: fixed;
+  z-index: 40;
+  width: 268px;
+  padding: 10px 12px 12px;
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  background: var(--panel-bg);
+  box-shadow: 0 12px 32px rgba(60, 50, 39, 0.22);
+}
+
+.subdiv-menu__title {
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.subdiv-menu__label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-dim);
+  margin: 8px 0 5px;
+}
+
+.subdiv-menu__grid {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 3px;
+}
+
+.subdiv-chip {
+  padding: 4px 0;
+  border: 1px solid var(--edge-soft);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.4);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.subdiv-chip:hover { background: rgba(255, 255, 255, 0.8); }
+
+.subdiv-chip--on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+.subdiv-menu__slots {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+}
+
+.subdiv-slot {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.subdiv-slot__index {
+  font-size: 10px;
+  color: var(--ink-dim);
+  width: 12px;
+}
+
+.subdiv-slot__select {
+  flex: 1;
+  min-width: 0;
+  padding: 2px;
+  border: 1px solid var(--edge-soft);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.5);
+  font-size: 11px;
+}
+
+.subdiv-menu__note {
+  margin-top: 10px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--ink-dim);
+}
+
+/* --- first-gesture audio unlock (§8.2) --- */
+
+.audio-gate {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(239, 233, 221, 0.82);
+  backdrop-filter: blur(2px);
+}
+
+.audio-gate__button {
+  padding: 14px 28px;
+  border: 1px solid var(--edge);
+  border-radius: 999px;
+  background: var(--panel-bg);
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 8px 24px rgba(60, 50, 39, 0.18);
+}
+
+.audio-gate__button:hover { background: #fff; }
+
+.audio-gate__hint {
+  position: absolute;
+  bottom: 28%;
+  font-size: 12px;
+  color: var(--ink-dim);
+}
+
+/* --- file bar (§10) --- */
+
+.app-transport {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 0 8px;
+}
+
+.app-transport .transport {
+  flex: 1 1 auto;
+  min-width: 0;
+}

@@ -1,0 +1,735 @@
+/*
+ * Chrome styles: layer panel, transport, inspector.
+ *
+ * The palette is pulled from src/board/theme.ts so the panels and the canvas read
+ * as one product — the same warm board wood, the same 90/74/52 ink for rules and
+ * labels, the same #c2410c for anything live. Dense by default: 12px text, 26–30px
+ * controls, tight rhythm. Nothing here styles the board itself.
+ */
+
+.layer-panel,
+.transport,
+.inspector {
+  /* Surfaces — theme.boardBg / gutterBg, one step lighter for raised rows. */
+  --go-bg: #ded4c2;
+  --go-surface: #e9e1d3;
+  --go-surface-raised: #f4eee2;
+  --go-surface-sunken: #d7cbb6;
+
+  /* Ink — theme.gutterText and its dimmed forms. */
+  --go-ink: #3d3227;
+  --go-ink-dim: #6b5a42;
+  --go-ink-faint: rgba(107, 90, 66, 0.6);
+
+  /* Rules — theme.gridLine family. */
+  --go-line: rgba(90, 74, 52, 0.22);
+  --go-line-soft: rgba(90, 74, 52, 0.1);
+
+  /* Live things — theme.playhead. */
+  --go-accent: #c2410c;
+  --go-accent-soft: rgba(194, 65, 12, 0.12);
+  --go-danger: #a03a5c;
+
+  --go-radius: 5px;
+  --go-gap: 6px;
+  --go-row-h: 30px;
+  --go-control-h: 26px;
+  --go-font: Poppins, ui-sans-serif, system-ui, sans-serif;
+  --go-num: 'Poppins', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  font-family: var(--go-font);
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--go-ink);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* --------------------------------------------------------------------------
+ * Shared primitives
+ * ---------------------------------------------------------------------- */
+
+.chrome-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--go-surface);
+  border: 1px solid var(--go-line);
+  border-radius: var(--go-radius);
+  overflow: hidden;
+}
+
+.chrome-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--go-gap);
+  height: 28px;
+  padding: 0 10px;
+  background: var(--go-surface-sunken);
+  border-bottom: 1px solid var(--go-line);
+  flex: 0 0 auto;
+}
+
+.chrome-panel__title {
+  margin: 0;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--go-ink-dim);
+}
+
+.chrome-dim {
+  color: var(--go-ink-faint);
+}
+
+.chrome-num {
+  font-family: var(--go-num);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.chrome-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: var(--go-control-h);
+  padding: 0 10px;
+  font: inherit;
+  font-weight: 500;
+  color: var(--go-ink);
+  background: var(--go-surface-raised);
+  border: 1px solid var(--go-line);
+  border-radius: var(--go-radius);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 90ms ease, border-color 90ms ease, color 90ms ease;
+}
+
+.chrome-btn:hover:not(:disabled) {
+  background: #fbf7ee;
+  border-color: rgba(90, 74, 52, 0.34);
+}
+
+.chrome-btn:active:not(:disabled) {
+  background: var(--go-surface-sunken);
+}
+
+.chrome-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.chrome-btn:focus-visible,
+.chrome-input:focus-visible,
+.layer-toggle:focus-visible,
+.layer-swatch:focus-visible,
+.transport-nudge__slider:focus-visible {
+  outline: 2px solid var(--go-accent);
+  outline-offset: 1px;
+}
+
+.chrome-btn--primary {
+  min-width: 84px;
+  color: #fff7f0;
+  background: var(--go-accent);
+  border-color: rgba(120, 40, 6, 0.6);
+}
+
+.chrome-btn--primary:hover:not(:disabled) {
+  background: #d24a10;
+  border-color: rgba(120, 40, 6, 0.75);
+}
+
+.chrome-btn--primary.is-playing {
+  background: #8a3208;
+}
+
+.chrome-btn--toggle.is-on {
+  color: #7a2c07;
+  background: var(--go-accent-soft);
+  border-color: rgba(194, 65, 12, 0.45);
+}
+
+.chrome-btn--alert {
+  color: #7a2c07;
+  background: rgba(194, 65, 12, 0.14);
+  border-color: rgba(194, 65, 12, 0.5);
+  animation: chrome-pulse 2.4s ease-in-out infinite;
+}
+
+.chrome-btn--danger:hover:not(:disabled) {
+  color: var(--go-danger);
+  border-color: rgba(160, 58, 92, 0.5);
+}
+
+.chrome-btn--nudge {
+  width: 18px;
+  height: 14px;
+  padding: 0;
+  font-size: 8px;
+  line-height: 1;
+  color: var(--go-ink-faint);
+  border-radius: 3px;
+}
+
+@keyframes chrome-pulse {
+  0%, 100% { border-color: rgba(194, 65, 12, 0.5); }
+  50% { border-color: rgba(194, 65, 12, 0.95); }
+}
+
+.chrome-input {
+  height: var(--go-control-h);
+  padding: 0 6px;
+  font: inherit;
+  color: var(--go-ink);
+  background: var(--go-surface-raised);
+  border: 1px solid var(--go-line);
+  border-radius: var(--go-radius);
+  min-width: 0;
+}
+
+.chrome-input--num {
+  width: 62px;
+  font-family: var(--go-num);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.chrome-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chrome-field__label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--go-ink-dim);
+  white-space: nowrap;
+}
+
+/* --------------------------------------------------------------------------
+ * Layer panel (§4)
+ * ---------------------------------------------------------------------- */
+
+.layer-panel {
+  width: 260px;
+  flex: 1 1 auto;
+}
+
+.layer-panel__tally {
+  font-family: var(--go-num);
+  font-variant-numeric: tabular-nums;
+}
+
+.layer-list {
+  flex: 1 1 auto;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.layer-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 3px 16px 1fr auto 22px 22px 20px;
+  align-items: center;
+  gap: 6px;
+  height: var(--go-row-h);
+  padding: 0 6px 0 0;
+  border-bottom: 1px solid var(--go-line-soft);
+  cursor: pointer;
+  user-select: none;
+}
+
+.layer-row:hover {
+  background: rgba(255, 253, 247, 0.55);
+}
+
+/* The active layer is the one the board writes to — it must be unmistakable. */
+.layer-row--active {
+  background: var(--go-surface-raised);
+  box-shadow: inset 0 0 0 1px rgba(194, 65, 12, 0.25);
+}
+
+.layer-row--active .layer-row__name {
+  font-weight: 600;
+  color: var(--go-ink);
+}
+
+/* visible and audible are independent (§4) — each dims only its own signal. */
+.layer-row--hidden .layer-row__name,
+.layer-row--hidden .layer-row__count {
+  opacity: 0.5;
+}
+
+.layer-row--muted .layer-row__name {
+  font-style: italic;
+}
+
+.layer-row__rail {
+  align-self: stretch;
+  width: 3px;
+  opacity: 0.9;
+}
+
+.layer-row--hidden .layer-row__rail {
+  opacity: 0.28;
+}
+
+.layer-swatch-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.layer-swatch {
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: 1px solid rgba(60, 48, 34, 0.45);
+  border-radius: 50%;
+  cursor: pointer;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+
+.layer-palette {
+  position: absolute;
+  top: 20px;
+  left: -4px;
+  z-index: 20;
+  display: grid;
+  grid-template-columns: repeat(3, 18px);
+  gap: 5px;
+  padding: 6px;
+  background: var(--go-surface-raised);
+  border: 1px solid var(--go-line);
+  border-radius: var(--go-radius);
+  box-shadow: 0 6px 18px rgba(60, 48, 34, 0.22);
+}
+
+.layer-palette__chip {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid rgba(60, 48, 34, 0.35);
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.layer-palette__chip--on {
+  box-shadow: 0 0 0 2px var(--go-surface-raised), 0 0 0 3px var(--go-accent);
+}
+
+.layer-row__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--go-ink-dim);
+}
+
+.layer-row__rename {
+  height: 20px;
+  padding: 0 4px;
+  font-size: 12px;
+}
+
+.layer-row__count {
+  font-family: var(--go-num);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+}
+
+.layer-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 20px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--go-ink-dim);
+  cursor: pointer;
+}
+
+.layer-toggle:hover {
+  background: rgba(255, 253, 247, 0.9);
+  border-color: var(--go-line-soft);
+}
+
+.layer-toggle.is-off {
+  color: rgba(107, 90, 66, 0.35);
+}
+
+.layer-toggle.is-on {
+  color: var(--go-ink-dim);
+}
+
+.layer-row__move {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.layer-panel__foot {
+  display: flex;
+  gap: 4px;
+  padding: 6px;
+  background: var(--go-surface-sunken);
+  border-top: 1px solid var(--go-line);
+  flex: 0 0 auto;
+}
+
+.layer-panel__foot .chrome-btn {
+  flex: 1 1 auto;
+  padding: 0 6px;
+  font-size: 11px;
+}
+
+/* --------------------------------------------------------------------------
+ * Transport (§3.3, §8)
+ * ---------------------------------------------------------------------- */
+
+.chrome-bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 7px 12px;
+  background: var(--go-surface);
+  border: 1px solid var(--go-line);
+  border-radius: var(--go-radius);
+}
+
+.transport {
+  flex-wrap: wrap;
+}
+
+.btn-play__glyph {
+  font-size: 10px;
+  line-height: 1;
+}
+
+.transport-toggles,
+.transport-history {
+  display: flex;
+  gap: 4px;
+}
+
+.btn-undo {
+  max-width: 190px;
+}
+
+.btn-undo__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.btn-undo__glyph,
+.btn-redo__glyph {
+  font-size: 13px;
+  line-height: 1;
+}
+
+.transport-nudge {
+  gap: 8px;
+}
+
+.transport-nudge__slider {
+  width: 110px;
+  accent-color: var(--go-accent);
+}
+
+.transport-nudge__value {
+  width: 56px;
+  font-size: 11px;
+  text-align: right;
+  color: var(--go-ink-dim);
+}
+
+.transport-audio {
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+}
+
+.audio-loading {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  color: var(--go-ink-dim);
+}
+
+.audio-loading__track {
+  display: block;
+  width: 90px;
+  height: 4px;
+  background: var(--go-surface-sunken);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.audio-loading__fill {
+  display: block;
+  height: 100%;
+  background: var(--go-accent);
+  transition: width 120ms linear;
+}
+
+.audio-loading__pct {
+  width: 34px;
+  font-size: 11px;
+  text-align: right;
+}
+
+.audio-ready {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--go-ink-faint);
+}
+
+.audio-ready__dot {
+  width: 6px;
+  height: 6px;
+  background: #2f6f5e;
+  border-radius: 50%;
+}
+
+.audio-error {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--go-danger);
+}
+
+/* --------------------------------------------------------------------------
+ * Inspector (§6.1)
+ * ---------------------------------------------------------------------- */
+
+.inspector {
+  width: 260px;
+  flex: 0 0 auto;
+  gap: 0;
+}
+
+.inspector__scope {
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.inspector__empty,
+.inspector__hint {
+  margin: 0;
+  padding: 10px;
+  font-size: 11px;
+}
+
+.inspector__identity {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 10px 10px 6px;
+}
+
+.inspector__chip {
+  align-self: center;
+  width: 10px;
+  height: 10px;
+  border: 1px solid rgba(60, 48, 34, 0.4);
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+.inspector__pitch {
+  font-family: var(--go-num);
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.inspector__name {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.inspector__layer {
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inspector-grid {
+  display: grid;
+  grid-template-columns: 84px 1fr;
+  gap: 3px 8px;
+  margin: 0;
+  padding: 4px 10px 10px;
+  border-bottom: 1px solid var(--go-line-soft);
+}
+
+.inspector-grid__key {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--go-ink-faint);
+  align-self: center;
+}
+
+.inspector-grid__val {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inspector-grid__unit {
+  font-size: 10px;
+}
+
+.inspector-vel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 10px;
+}
+
+.inspector-vel__source {
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  padding: 2px 6px;
+  border-radius: 999px;
+  color: var(--go-ink-dim);
+  background: var(--go-surface-sunken);
+}
+
+.inspector-vel__source--note {
+  color: #7a2c07;
+  background: var(--go-accent-soft);
+}
+
+.inspector-chain {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 10px 10px;
+  font-family: var(--go-num);
+  font-size: 10px;
+  color: var(--go-ink-faint);
+}
+
+.inspector-chain__step {
+  padding: 2px 5px;
+  border: 1px solid var(--go-line-soft);
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+.inspector-chain__step.is-live {
+  color: var(--go-ink);
+  border-color: rgba(194, 65, 12, 0.45);
+  background: var(--go-accent-soft);
+}
+
+.inspector-chain__arrow {
+  opacity: 0.5;
+}
+
+.btn-vel-inherit {
+  margin: 0 10px 10px;
+  font-size: 11px;
+}
+
+/* --------------------------------------------------------------------------
+ * File bar and MIDI export dialog (§10)
+ * ---------------------------------------------------------------------- */
+
+.file-menu {
+  flex: 0 0 auto;
+  gap: 6px;
+  position: relative;
+}
+
+.file-menu__status {
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.file-menu__midi {
+  position: relative;
+}
+
+.midi-dialog {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 30;
+  width: 268px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 11px;
+  box-shadow: 0 10px 26px rgba(40, 30, 16, 0.22);
+}
+
+.midi-dialog__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.midi-dialog__ppq {
+  width: 92px;
+}
+
+.midi-dialog__presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.midi-dialog__preset {
+  padding: 3px 7px;
+  font-size: 11px;
+}
+
+.midi-dialog__note {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.midi-dialog__note.is-exact {
+  color: var(--go-ink-dim);
+}
+
+.midi-dialog__note.is-lossy {
+  color: var(--go-accent);
+}
+
+.midi-dialog__check {
+  font-size: 11px;
+  color: var(--go-ink-dim);
+}
+
+.midi-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}

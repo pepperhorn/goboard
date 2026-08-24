@@ -19,6 +19,10 @@ export type UiState = {
   canRedo: boolean
   undoLabel: string | undefined
   isDirty: boolean
+  /** `Date.now()` of the last autosave write, or null before the first one (§10). */
+  savedAt: number | null
+  /** True while an autosave write is in flight. */
+  saving: boolean
 
   activeLayerId: string
   selectedNoteId: NoteId | null
@@ -49,6 +53,8 @@ export const useUiStore = create<UiState>((set) => ({
   canRedo: false,
   undoLabel: undefined,
   isDirty: false,
+  savedAt: null,
+  saving: false,
 
   activeLayerId: '',
   selectedNoteId: null,

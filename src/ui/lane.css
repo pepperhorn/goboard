@@ -1,0 +1,38 @@
+/*
+ * Velocity lane wrapper only (go-spec.md §6.2). The bars are painted on the canvas by
+ * `board/lane.ts`; nothing here may style the board, the ruler or the gutter.
+ */
+
+.velocity-lane {
+  position: relative;
+  width: 100%;
+  flex: 0 0 auto;
+  overflow: hidden;
+  background: #ece4d6; /* theme.laneBg — the canvas repaints it every frame. */
+  border-top: 1px solid rgba(90, 74, 52, 0.25); /* theme.laneEdge */
+  font-family: Poppins, ui-sans-serif, system-ui, sans-serif;
+}
+
+.velocity-lane-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* §7.3 canvas event hygiene: the lane drags vertically, so the browser must not
+     claim the gesture for scrolling or text selection. */
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: ns-resize;
+}
+
+.velocity-lane-label {
+  position: absolute;
+  top: 4px;
+  left: 6px;
+  pointer-events: none;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(107, 90, 66, 0.55); /* theme.gutterTextDim */
+}
