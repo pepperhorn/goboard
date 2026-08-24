@@ -1,5 +1,5 @@
 # Go — Grid Composition App
-## Technical Specification & Build Plan v1.0
+## Technical Specification & Build Plan v1.1
 
 **Working name:** Go (as in the board game). Repo name: `go-board` (avoids collision with the Go language in search/tooling).
 
@@ -32,6 +32,19 @@ The Go metaphor drives the visual language:
 
 **Architectural rule:** a note edit must never trigger a React render. React renders chrome (layer panel, transport, velocity-lane container, inspector). The board canvas subscribes to the store imperatively and redraws in `requestAnimationFrame` (dirty-flag: redraw only when store version or viewport changes).
 
+The rule is enforced **structurally, not by discipline** — two stores, not two slices:
+
+| Store | Contents | Exports |
+|---|---|---|
+| `boardStore` (`zustand/vanilla`) | notes, runtime indexes (§4.1), `Viewport`, `renderVersion`, `commitVersion` | **no React hook at all** |
+| `uiStore` (Zustand + React) | layer metadata, `activeLayerId`, transport, inspector target, undo/redo enabled, autosave state | hooks |
+
+With a single store, one stray `useStore(s => s.notes.length)` silently breaks the invariant and nothing fails loudly. `Viewport` belongs in `boardStore` because pan/zoom writes 60×/second — which also means the gutter, ruler, and velocity-lane canvases are imperative subscribers, not prop consumers; their React wrappers render once and never again.
+
+**Two version counters.** `renderVersion` bumps on every mutation including intermediate drag frames (the canvas dirty flag); `commitVersion` bumps only on command commit or drag end (what React watches). A single counter forces a choice between 60 Hz React renders during a drag and a stale inspector after it.
+
+React subscribes only to **derived scalars** — `canUndo`, `isDirty`, a selected-note snapshot, throttled note counts — via `store.subscribe` + local state, never to the note array itself. The vanilla store may mutate note objects in place (cloning a 50k array per keystroke is not viable), which is incompatible with reference-equality selectors and is a further reason for the split; the `{do, undo}` command pattern stays valid as long as inverses capture explicit prior values. Guard the rAF loop and store subscriptions against React StrictMode's double-invoked effects, or dev builds get doubled commands on the undo stack.
+
 ---
 
 ## 3. Time Model (foundational — build first)
@@ -46,20 +59,41 @@ type Pos  = { col: number; frac: Frac };     // col = quarter-note index (intege
                                              // frac = offset within the column, 0 ≤ frac < 1
 ```
 
-- Sorting: by `col`, then cross-multiply fractions (`a.n * b.d` vs `b.n * a.d`). Denominators are ≤ 16 × 16 = 256, so plain number math is exact — no BigInt, no floats in the model.
-- Durations are also `Frac`, in quarter-note units. A duration may cross column boundaries.
+**Denominator lattice.** Slot-boundary denominators within one column are `s₁·s₂ ≤ 256`. Derived denominators — anything produced by addition — divide
+
+```
+L = 2⁸·3⁴·5²·7²·11²·13² = 519,437,318,400   (≈ 5.19e11)
+```
+
+and this lattice is **closed under addition**, so no reachable `Frac` ever escapes it. `L` is itself an exact float, but `L² = 2.7e23` is not — hence the rules below.
+
+- **`add`/`sub` must reduce before multiplying:** `g = gcd(b,d); den = b*(d/g); num = a*(d/g) + c*(b/g)`. Never form `b*d` — that overflows 2⁵³ in ordinary use (five columns of nested tuplets reach `d = 3.07e9`, and `b*d = 9.4e18` on the next addition).
+- **`cmp` cross-multiplies after reducing by `gcd(a.d, b.d)`,** bounding the product at `L`. (Naive cross-multiplication happens to order correctly on this lattice — distinct products differ by at least `d₁d₂/L` while the float ulp is `d₁d₂/2⁵²`, a margin of ~8,670× — but the code must not depend on that argument holding.)
+- **Canonical forms:** `normalize(0)` returns `{n:0, d:1}`; `gcd` carries sign so `d > 0` always holds after `sub`/`mul` with a negative operand. Without this, `0/5` and `0/1` are distinct and `eq`/dedup/JSON round-trip disagree.
+- Durations are also `Frac`, in quarter-note units, and must be `> 0` (enforced). A duration may cross column boundaries.
 - Utility module `frac.ts`: `normalize`, `add`, `sub`, `cmp`, `mul`, `lt/lte/eq`, `toNumber` (display/render only, never storage).
+
+**Pos canonicalization.** Every mutation routes through a single `canonicalize(col, frac)` chokepoint that restores `0 ≤ frac < 1`. It must use **floored** div-mod, not `%` — JS `%` truncates (`(-1) % 3 === -1`), so a leftward drag would yield `{col: 0, frac: -1/3}` instead of the canonical `{col: -1, frac: 2/3}`. Those denote the same instant but sort differently and produce different index keys, so the same note becomes findable at two columns.
+
+```ts
+q = Math.trunc(n/d); r = n - q*d;
+if (r < 0) { q--; r += d; }
+while (r >= d) { q++; r -= d; }   // repairs any ±1 float error in the division
+```
 
 ### 3.2 Subdivision tree
 
 Per **column, per layer**, depth ≤ 2:
 
 ```ts
-type Subdiv = {
-  split: number;                 // 1–16 (1 = whole column, one slot)
-  children?: (Subdiv | null)[];  // length === split; null = leaf slot; depth limit 2
+type SubdivL2 = { split: number };                    // 1–16, no children — depth limit is in the type
+type Subdiv   = {
+  split: number;                                      // 1–16 (1 = whole column, one slot)
+  children?: (SubdivL2 | null)[];                     // length === split; null = leaf slot
 };
 ```
+
+The two-level split is deliberate: a singly-recursive `Subdiv` cannot express "depth ≤ 2", and an imported file nesting deeper blows the 256-slot bound. `children.length === split` is **validated on load/import**, not assumed.
 
 Default (no entry in the map): `{ split: 1 }` — one slot = quarter note.
 
@@ -76,7 +110,13 @@ Example — 16ths with triplet 32nds on the last 16th:
 type TempoEvent = { pos: Pos; bpm: number };   // sorted; index 0 at col 0 (default 120)
 ```
 
-`toSeconds(pos, tempoMap)`: piecewise-linear accumulation across tempo segments (quarters ÷ (bpm/60) per segment). Converting to seconds happens **only** in the scheduler; converting to integer ticks happens **only** at MIDI export.
+`toSeconds(pos, tempoMap)`: tempo is **piecewise-constant**, so seconds is piecewise-**linear** in quarters (quarters ÷ (bpm/60) per segment). Stating it this way matters: a v2 tempo *ramp* is logarithmic (`t = 60·Δq·ln(b₁/b₀)/(b₁−b₀)`) with an exponential inverse, and must not inherit this formula.
+
+Because every segment slope `60/bpm` is strictly positive, the map is strictly increasing and **invertible in closed form**. Precompute a prefix array of `(quartersᵢ, secondsᵢ)` per event; `secondsToPos(s)` is a binary search plus `q = qᵢ + (s − sᵢ)·bpmᵢ/60` — O(log n), and O(1) amortized during playback since the playhead advances monotonically (cache the segment index). Invalidate on tempo edits only.
+
+Validation: `bpm > 0` (enforce `bpm ∈ [3.576, 999]` — the lower bound is the 24-bit µs/quarter MIDI tempo meta), and de-duplicate coincident positions (last wins) so no zero-length segment exists for the binary search to land inside.
+
+Converting to seconds happens **only** in the scheduler; converting to integer ticks happens **only** at MIDI export.
 
 ### 3.4 Meter / barlines (v1)
 
@@ -138,8 +178,15 @@ Non-active visible layers draw at reduced opacity (~0.45); the active layer draw
 ### 4.1 Runtime indexes (not persisted)
 
 - `notesByLayer: Map<LayerId, Note[]>` sorted by `pos` — playback iteration, viewport queries.
-- `notesByCell: Map<string, NoteId[]>` keyed by `` `${layerId}:${col}:${pitch}` `` — O(1) hit-testing/toggle.
-- Viewport query = binary search on sorted `col` range per visible layer. Rebuild indexes on load; maintain incrementally on edit.
+- `notesByCell: Map<string, NoteId[]>` keyed by `` `${layerId}:${col}:${pitch}` ``, each bucket sorted by `frac` — placement and toggle. The key deliberately drops `frac`, so a bucket holds every note at that pitch in that column; the scan is short but **not O(1)**, and §7's "changing a subdivision re-quantizes nothing" means bucket size has no 256-slot ceiling — it grows with editing history.
+- `maxDurQuarters: Map<LayerId, number>` — the longest duration on the layer, maintained incrementally.
+
+**Long notes are indexed at their onset only.** A note at col 5 with `dur = 4` draws as a lozenge across cols 5–8 but has no index entry at 6, 7, 8. Both hit-testing and viewport culling must therefore begin their scan at `col − ceil(maxDurQuarters)`, not `col − 1`. Without this, clicking a lozenge's body or right edge finds nothing (so the app places a new stone on top of the one you clicked, and §7's resize gesture — which by definition lands on a *far* column — cannot work), and long notes vanish from the board when you pan right past their onset.
+
+This is deliberately cheaper than an interval tree, and exact: `maxDurQuarters` stays ~1–8 in practice.
+
+- Viewport query = binary search on the sorted `col` range per visible layer, widened by `maxDurQuarters` as above. Rebuild indexes on load; maintain incrementally on edit.
+- **On move/resize, delete the old key before inserting the new one.** This is the classic index-desync bug and it gets an explicit test.
 
 ### 4.2 Undo/redo
 
@@ -169,8 +216,25 @@ type Viewport = { xQuarters: number; yPitch: number; pxPerQuarter: number; pxPer
 
 ### 5.3 Performance targets
 
-- 60fps pan/zoom with 5k notes in the viewport, 50k in the project.
-- Cull to viewport ± 1 column margin. Skip subdivision line pass when `pxPerQuarter < 48`.
+- 60fps pan/zoom with 5k notes in the viewport, 50k in the project — **conditional on the techniques below**, which are requirements, not optimizations. Naive per-stone `arc`+`fill`+`stroke` costs 12–25 ms for 5k stones, and the render budget is ~10 ms once the scheduler and GC take their share of the main thread.
+- Cull to viewport ± `ceil(maxDurQuarters)` columns (§4.1), not ± 1.
+
+**Required techniques**
+
+1. **Stone sprite atlas.** One `drawImage` per stone (≈ 2–4 ms for 5k, a 4–6× win over path construction). Atlas key = (white|black fill, layer color, radius bucket, active|dimmed); quantize radius to ~10 buckets and regenerate on zoom-end.
+2. **The §1 glow is atlas-only.** `ctx.shadowBlur` is a software path in Skia — 5k glowing stones is ~200 ms/frame. It must be baked into the sprite, never applied live.
+3. **Pan is a self-blit.** Pan is pure translation: blit the previous frame at an offset and repaint only the newly exposed strip (~16×1600 px instead of 8.3 Mpx). Biggest single win, because pan is the dominant gesture. Zoom still does a full redraw.
+4. **Playhead and hover ghost live on their own overlay canvas.** Otherwise the playhead sets the dirty flag every frame and the whole board repaints at 60fps for an entire song with zero edits.
+5. **All gridlines batch into one `Path2D`, one `stroke()`** — flattens the worst case (33 columns × 256 slots) from ~12 ms to ~0.5 ms.
+6. **Two subdivision-line guards:** skip the pass when `pxPerQuarter < 48`, *and* skip any depth whose slot width is under 4 px.
+7. **Cap the backing store at `min(devicePixelRatio, 2)`** and snap gridline/rect coordinates to device pixels (`Math.round(x*dpr)/dpr`, +0.5 for 1 px lines). Fractional device positions force antialiasing on every edge — slower *and* blurrier.
+8. **Batch by style:** iterate layer-major (as §5.2 already does) so `strokeStyle` and `globalAlpha` are assigned once per layer, not once per stone.
+
+**Level of detail.** 5k visible notes only occurs at minimum zoom: at 24 px/quarter × 8 px/semitone the viewport holds ~7,600 quarter-cells, versus ~970 at the 96×16 default. At that zoom stone radius is 3.4 px and the 2 px layer ring is sub-pixel — invisible. So below radius ~4 px, drop the ring and fill the stone in the layer color instead. Cheaper *and* more legible, which makes the stated worst case the easiest case.
+
+**Canvas coordination.** The board, gutter, velocity lane, and overlay are separate canvases but share **one** rAF owner (three independent loops tear visibly during fast pan), **one** `Viewport` object, and **one** `worldToScreen`. Each canvas bakes `-frac(rect.left*dpr)` / `-frac(rect.top*dpr)` into its own `setTransform`: under browser zoom or a fractional flex width, `rect.left * dpr` is fractional and *differs per canvas*, so lane bars would land up to 1 px off the board's columns. Reassigning `canvas.width/height` clears the surface and resets the transform, so every resize re-applies the transform and forces a full redraw of all four; DPR changes at runtime (window dragged to another monitor) need a `matchMedia('(resolution: Xdppx)')` listener.
+
+**Benchmark, not prose.** M2 records a scripted frame-time number at a fixed viewport and DPR, and it is re-run at every subsequent milestone — the target will otherwise rot quietly as the playhead, lane, and subdivision lines add per-frame work.
 
 ---
 
@@ -199,19 +263,49 @@ Column-level velocity is **time-linear per layer**: all notes in a column stack 
 
 ## 7. Interaction (v1)
 
-| Gesture | Action |
-|---|---|
-| Click empty slot | Place stone: active layer, slot duration, inherited velocity |
-| Click stone (active layer) | Remove it |
-| Drag stone | Move (quantized to slots vertically/horizontally); Alt-drag duplicates |
-| Drag stone's right edge | Lengthen/shorten duration in slot increments |
-| Right-click / long-press column header | Subdivision editor for that column (active layer): pick split 1–16; then optionally tap a slot and pick a nested split 2–16 |
-| Space | Play/stop from playhead |
-| Drag on ruler | Set loop region; click ruler clears |
-| Middle-drag / two-finger drag / space+drag | Pan |
-| Ctrl+wheel / pinch | Zoom |
-| Ctrl+Z / Ctrl+Shift+Z | Undo/redo |
-| 1–9 keys | Quick-set active column split under cursor |
+### 7.1 The ruler
+
+§5.2's draw pass gains a **ruler strip** pinned above the board, horizontally locked to the board's pan/zoom. It is a single surface — column numbers, the loop region, and the playhead handle — and it owns every gesture in the "ruler" rows below. There is no separate "column header".
+
+### 7.2 Gestures
+
+| Surface | Gesture | Action |
+|---|---|---|
+| Board | Click empty slot | Place stone: active layer, slot duration, inherited velocity |
+| Board | Drag from empty slot | Paint stones along the drag (one per slot entered) |
+| Board | Click stone (active layer) | Remove it |
+| Board | Drag stone | Move, quantized to slots in both axes |
+| Board | **Ctrl/Cmd-drag** stone | Duplicate |
+| Board | Drag stone's right edge | Lengthen/shorten duration in slot increments |
+| Board | Double-click stone (any layer) | Make that stone's layer active |
+| Board | Escape (during any drag) | Cancel the drag, restore the pre-drag state |
+| Ruler | Click | Seek playhead |
+| Ruler | Drag | Set loop region |
+| Ruler | Shift-click | Clear loop region |
+| Ruler | Right-click / long-press a column | Subdivision editor for that column (active layer): pick split 1–16; then optionally tap a slot and pick a nested split 2–16 |
+| Any | Space | Play/stop from playhead |
+| Any | Wheel | Pan vertically |
+| Any | Shift+wheel | Pan horizontally |
+| Any | Middle-drag / two-finger drag | Pan |
+| Any | Ctrl+wheel / pinch | Zoom about the cursor |
+| Any | Ctrl+Z / Ctrl+Shift+Z | Undo/redo |
+| Any | `1`–`9`, `0` | Quick-set split 1–10 on the hovered column (or hovered slot, if the pointer is inside a subdivided column — that sets the nested split) |
+| Any | `Shift+1`–`Shift+6` | Quick-set split 11–16, same target rule |
+
+**Bindings deliberately not used.** `Space+drag` to pan is dropped — play fires on keydown, so arming the pan would start playback. `Alt-drag` is not a board binding: GNOME and KDE consume it for window moves, and §6.2 already uses Alt in the velocity lane.
+
+### 7.3 Rules the gestures depend on
+
+- **Click vs drag.** `pointerdown` captures the pointer. Crossing 4 px (mouse) or 10 px (touch) latches "drag" **permanently** — returning to the origin must never re-arm the delete. Without this, a 2 px twitch during an intended move destroys a note.
+- **One command per drag**, emitted on `pointerup` — not one per quantize step, or Ctrl+Z rewinds a drag one slot at a time.
+- **Hit testing is geometric, then slot-based.** Test the point against the *drawn* stone/lozenge rectangle. Slot resolution decides only where an empty-space click places a new stone. Slot-based hit testing would make off-grid notes (see below) permanently unclickable — visible but impossible to remove or move.
+- **Hit priority is the inverse of draw order:** active layer first, then descending `order`. Otherwise you delete the stone underneath the one you clicked.
+- **Non-active layers are pointer-transparent** — clicks fall through to place on the active layer. Double-click is the only gesture that reaches them.
+- **Same-cell ties** resolve to the shortest duration, then most-recently-added. The command layer forbids two notes with identical `(layer, pitch, pos)`.
+- **Resize hot zone** is `min(6px, stoneWidth * 0.25)` and is disabled below 16 px stone width; at minimum zoom a fixed 6 px zone would swallow the entire 6.8 px stone and make click-to-remove unreachable.
+- **Audition on drag** (§8.2) fires only when the quantized pitch changes, and never on a removal click.
+- **Kit layers reject placement** on unmapped rows (§9.3) — the click is a silent no-op, not a pan.
+- **Canvas event hygiene:** `touch-action: none`, `user-select: none`, native context menu suppressed, middle-mousedown default prevented (Linux paste / Windows autoscroll), `wheel` bound with `{passive: false}` on the element (React's `onWheel` cannot reliably `preventDefault` browser page zoom), `e.repeat` filtered on Space, and Space `preventDefault`ed globally so it doesn't activate a focused layer-panel button.
 
 Notes placed where no subdivision exists land on the quarter slot. Changing a column's subdivision **re-quantizes nothing** — existing notes keep their exact rational positions; they may sit off the new grid (render slightly desaturated ring to flag "off-grid for this layer's current subdiv").
 
@@ -223,17 +317,19 @@ Notes placed where no subdivision exists land on the quarter slot. Changing a co
 
 Classic lookahead pattern (Chris Wilson "A Tale of Two Clocks"):
 
-- `setInterval` at 25 ms; each tick, schedule everything with onset in `[now, now + 0.1 s)` against `AudioContext.currentTime`.
-- Per audible layer, maintain a cursor into `notesByLayer` (sorted); advance as scheduled. Effective velocity resolved at schedule time (§6.1) → smplr `velocity`.
-- `sampler.start({ note: pitch, velocity, time, duration: durSeconds })` — duration converted through the tempo map (a note spanning a tempo change gets its true elapsed seconds).
-- Play/stop/seek: stop cancels scheduled sources (track handles via smplr's stop or per-note stop tokens); seek rebuilds cursors by binary search.
-- Loop: when the schedule window crosses `loop.end`, wrap cursors to `loop.start` and continue scheduling with a time offset.
-- Playhead UI reads `AudioContext.currentTime` in the rAF loop and inverts the tempo map — never trust `setInterval` timing for visuals.
+- A 25 ms timer **running in a Web Worker**; each tick, schedule everything with onset in `[now, now + 0.1 s)` against `AudioContext.currentTime`. The worker is not optional: a playing tab escapes Chrome's intensive throttling only because it "made noises in the past 30 seconds", so a silent stretch over 30 s — or starting playback from a background tab — drops a main-thread `setInterval` to 1 s ticks, which a 100 ms lookahead cannot survive.
+- **The per-layer cursor is a `Pos` value, not an array index.** Each tick binary-searches `notesByLayer` from the last-scheduled position (O(log n), free at 25 ms). An index breaks the moment the user edits during playback — which §7 makes a first-class gesture: inserting a note before the cursor shifts every later element (double-trigger), and deleting the note it points at skips the next one. Also track the `NoteId`s scheduled within the current window so an edit cannot re-fire a note already committed to the audio graph.
+- Effective velocity resolved at schedule time (§6.1) → smplr `velocity`. A `colVel` edit therefore cannot affect the ≤100 ms already committed; that is correct behaviour.
+- `instrument.start({ note: pitch, velocity, time, duration: durSeconds, stopId: note.id })` — duration converted through the tempo map (a note spanning a tempo change gets its true elapsed seconds). **`stopId` is mandatory:** it defaults to the note number, so stopping one C4 would stop every sounding C4 — and a repeated pitch on a grid is the common case.
+- Play/stop/seek: **keep the `StopFn` returned by every scheduled note** and call them all on stop. Do not rely on `instrument.stop()`: smplr runs its own 200 ms internal lookahead, and notes beyond it sit in a queue that `stop()` does not drain. Our 100 ms lookahead happens to stay inside that window, but nothing should depend on it — alternatively construct instruments with `scheduler: Scheduler(ctx, {lookaheadMs: 0})`. Regression test: stop must kill a note scheduled at `now + 250 ms`. Seek rebuilds cursors by binary search.
+- Loop: `while (windowEnd > loopEndSec) { schedule up to loopEndSec; cursor = loop.start; timeOffset += loopLengthSec; }` — a `while`, not an `if`, because a loop shorter than the 100 ms lookahead must emit several passes in one tick. Guard `loopLengthSec > 0` or a degenerate region spins forever. `loop.end` is **exclusive**; a note whose duration crosses it is truncated at the loop point. The constant `loopLengthSec` is valid because tempo is not editable in v1 — revisit when tempo-map editing lands.
+- Playhead UI reads `AudioContext.currentTime` in the rAF loop and inverts the tempo map — never trust timer callbacks for visuals. Subtract output latency first: `visualTime = currentTime - (ctx.outputLatency ?? 0) - ctx.baseLatency` (feature-detect; `outputLatency` is absent in Safari). `currentTime` is what the graph has *rendered*, not what is audible, so without this the playhead runs ahead of the sound — by tens of ms on speakers, 100–300 ms over Bluetooth. Expose a user-tunable offset slider; no formula beats letting the user nudge it.
 
 ### 8.2 Latency & lifecycle
 
-- Create `AudioContext` on first user gesture. `latencyHint: 'interactive'`.
-- Audition on placement: when a stone is placed/moved, fire the note immediately at effective velocity (nice feedback loop; toggleable).
+- Create `AudioContext` on first user gesture. `latencyHint: 'interactive'`. Nothing sounds before that gesture, so the transport shows an explicit "click to enable audio" state rather than failing silently.
+- Audition on placement: when a stone is placed/moved, fire the note at effective velocity (nice feedback loop; toggleable). Schedule it at `currentTime + 0.005` with a ~3 ms `ampAttack` on the audition path only — firing at exactly `currentTime` is already in the past relative to the next render quantum, so the sample's attack transient is clipped and reads as a click on percussive material.
+- Instruments load lazily per layer behind `await instrument.ready`, with `onLoadProgress` wired to real UI, a shared `SampleLoader`, and `storage: CacheStorage()` so reloads are instant.
 
 ---
 
@@ -249,12 +345,15 @@ One JSON per instrument, self-hosted (B2 or same-origin `/instruments/`):
   "name": "PepperHorn Piano",
   "kind": "pitched",              // "pitched" | "kit"
   "gmProgram": 0,                  // MIDI export program
-  "samples": { "48": "C3.ogg", "60": "C4.ogg", "72": "C5.ogg" },  // note → URL (smplr Sampler map)
-  "baseUrl": "https://…/piano/"
+  "samples": { "48": "C3", "60": "C4", "72": "C5" },   // MIDI note → sample name, EXTENSION-LESS
+  "baseUrl": "https://…/piano",
+  "formats": ["ogg", "m4a"]
 }
 ```
 
-Pitched instruments load into smplr `Sampler` (or `Soundfont` for GM placeholders in dev). Zone/stretch between sampled pitches is smplr's job.
+Pitched instruments load into smplr's `Sampler` via its **preset** path (`{ baseUrl, formats, map }`), which builds `` `${baseUrl}/${name}.${format}` `` — hence extension-less sample names, and free format negotiation. Note that smplr's *flat* `buffers` mode has no `baseUrl` at all and needs absolute URLs; using the preset path with `"C3.ogg"` would fetch `C3.ogg.ogg`.
+
+Because every key is a MIDI number, smplr spreads the sampled pitches across key ranges automatically — zone/stretch stays its job, as intended.
 
 ### 9.2 Drum kits
 
@@ -264,15 +363,19 @@ Pitched instruments load into smplr `Sampler` (or `Soundfont` for GM placeholder
   "name": "PepperHorn Kit",
   "kind": "kit",
   "gmBasis": true,                 // rows follow GM drum map numbering
+  "baseUrl": "https://…/kit",
+  "formats": ["ogg", "m4a"],
   "pieces": [
-    { "midi": 36, "label": "Kick",   "url": "kick.ogg" },
-    { "midi": 38, "label": "Snare",  "url": "snare.ogg" },
-    { "midi": 42, "label": "HH Cl",  "url": "hh-closed.ogg" },
-    { "midi": 46, "label": "HH Op",  "url": "hh-open.ogg" },
-    { "midi": 49, "label": "Crash",  "url": "crash.ogg" }
+    { "midi": 36, "label": "Kick",   "sample": "kick" },
+    { "midi": 38, "label": "Snare",  "sample": "snare" },
+    { "midi": 42, "label": "HH Cl",  "sample": "hh-closed" },
+    { "midi": 46, "label": "HH Op",  "sample": "hh-open" },
+    { "midi": 49, "label": "Crash",  "sample": "crash" }
   ]
 }
 ```
+
+Kits load as a `Sampler` keyed by the GM `midi` values, **not** as smplr's `DrumMachine` — `DrumMachine` maps `midi = 36 + indexInSamplesArray`, so GM row 38 would play whatever happens to sit at `samples[2]`. Loading kits as a Sampler is what keeps §9.3's "pitch stays a real GM MIDI number internally" true.
 
 The manifest is the **single source of truth** for both sound and board semantics.
 
@@ -284,17 +387,33 @@ When the active layer's instrument is `kind: "kit"`:
 - Rows without a mapped piece render dimmed and reject placement.
 - Stone color: all black (key-color semantics are meaningless for drums); layer ring as usual.
 - Pitch stays a real GM MIDI number internally → export needs no special casing beyond channel 10.
+- **Durations are forced to one slot.** Drum samples are one-shots, so duration is meaningless; the right-edge resize gesture (§7) is disabled on kit layers, and MIDI export writes a short fixed note-off. (Resolves open question 1.)
 
 ### 9.4 v1 instrument set
 
-Four starter layers: Piano, Guitar, Bass (smplr `Soundfont` GM programs 0 / 25 / 33 as placeholders until curated manifests exist), Drums (smplr `DrumMachine` or a minimal GM kit manifest). Channels 1/2/3/10.
+Four starter layers — Piano, Guitar, Bass, Drums on channels 1/2/3/10 — each a self-hosted §9.1/§9.2 manifest from day one. `gmProgram` stays in the manifest for MIDI export only.
+
+**No Soundfont/DrumMachine placeholder stage.** It would be more work than the real thing, not less: smplr's `SoundfontConfig.instrument` is a gleitz soundfont *name*, not a GM program number (`{instrument: 0}` throws outright), each soundfont is a ~2.3 MB base64-in-JS blob that must fully load before `ready` resolves, and `DrumMachine`'s array-order mapping contradicts §9.3. Four small manifests skip all of it and delete a code path that would be thrown away at M6 anyway.
+
+A handful of sampled pitches per instrument is enough — smplr stretches between them (§9.1).
 
 ---
 
 ## 10. Persistence & Export
 
 - **Project file:** JSON of `Project` (Maps serialized as entry arrays). Autosave to IndexedDB (debounced); manual export/import of `.go.json`.
-- **MIDI export (SMF type 1):** choose PPQ per file at export — compute LCM of all denominators present, cap at 960; tuplets that don't divide evenly round to nearest tick **at export only** (the sole place quantization error is permitted). One track per layer, program change from `gmProgram`, kit layers to channel 10, tempo map to meta events. Use `@tonejs/midi` for writing (the library is fine even though Tone.js itself isn't used).
+- **MIDI export (SMF type 1):** choose PPQ per file at export. SMF division is a 16-bit field with bit 15 clear, so the real ceiling is **32767**, not 960 — and 960 = 2⁶·3·5 is exact for *none* of the app's headline tuplets (a plain 9-tuplet already isn't). At 32767 a project mixing 16ths, triplets, 11s and 13s (`L = 6864`) exports **exactly**.
+
+  ```
+  L = lcm over ALL denominators: onsets, durations, pos+dur ends, tempo positions
+  if L <= 32767:  ppq = L * floor(32767 / L)          // exact, at maximum resolution
+  else:           ppq = largest divisor of L <= 32767 // enumerate 2^a·3^b·5^c·7^d·11^e·13^f
+                  fallback 30240 = 2^5·3^3·5·7        // exact for every split except 11 and 13
+  ```
+
+  Tuplets that still don't divide evenly round to nearest tick **at export only** (the sole place quantization error is permitted). Round **absolute** ticks and then difference them for delta-times — never round deltas, or a 0.45-tick error accumulates to roughly half a quarter note over 1000 events. Note that the damage is in duration, not onset: at 960 the smallest legal slot (1/256 quarter) is 3.75 ticks and rounds to 4, a 6.7% error, while onset error is 0.24 ms at 120 BPM.
+
+  One track per layer, program change from `gmProgram`, kit layers to channel 10, tempo map to meta events (24-bit µs/quarter — clamp BPM to ≥ 3.576). Use `@tonejs/midi` for writing (the library is fine even though Tone.js itself isn't used).
 - **Future (v2+):** MEI export. Rational durations + subdivision trees map near-directly onto MEI proportional durations/tuplet elements → straight path into the Verovio pipeline. Design nothing that blocks this; requires no v1 work.
 
 ---
@@ -306,7 +425,7 @@ Four starter layers: Piano, Guitar, Bass (smplr `Soundfont` GM programs 0 / 25 /
 **Out (v2+):** time signatures/meter, tempo-map editing UI, note selection marquee & multi-select ops, copy/paste, MEI export, curated sample library authoring, PixiJS renderer, collaboration, mobile touch polish beyond basic pan/place.
 
 **Open questions (decide during build, none blocking):**
-1. Duration model for drums — force one-slot durations on kit layers? (Probably yes.)
+1. ~~Duration model for drums~~ — **resolved in v1.1:** kit layers force one-slot durations (§9.3). It affects M3's resize gesture, not M6.
 2. Off-grid stone flagging UX after subdivision change (§7) — desaturated ring vs. warning dot.
 3. Ghost bars in the velocity lane — useful or noise? Ship behind a toggle.
 
@@ -314,18 +433,20 @@ Four starter layers: Piano, Guitar, Bass (smplr `Soundfont` GM programs 0 / 25 /
 
 ## 12. Build Order
 
-**M1 — Time core (no UI).** `frac.ts`, `Pos` ordering, `Subdiv` slot enumeration, tempo map `toSeconds`/inverse. Unit tests: nested 11×13 slot math, cross-column durations, tempo-change conversions. *Everything else stands on this.*
+**M1 — Time core (no UI).** `frac.ts`, `Pos` ordering and canonicalization, `Subdiv` slot enumeration and validation, tempo map `toSeconds`/`secondsToPos`, the §4.1 runtime indexes, and the command interface. Unit tests: nested 11×13 slot math, cross-column durations, tempo-change conversions, the denominator-lattice bounds of §3.1, floored div-mod across negative columns. Indexes and commands are pure and testable, and they belong here so M2's perf number measures the real data path. *Everything else stands on this.*
 
-**M2 — Board render.** Canvas viewport, pan/zoom, row shading, gridlines, stones from a hardcoded project. Perf check at 5k visible notes.
+**M2 — Board render.** Canvas viewport, pan/zoom, row shading, gridlines, ruler strip, left gutter, sprite atlas, playhead overlay canvas. Stones from a `.go.json` fixture. Records the §5.3 benchmark number, re-run at every later milestone. Golden-image snapshots at fixed viewport and DPR.
 
-**M3 — Editing.** Zustand store + command stack, place/remove/move/resize, subdivision editor, layer panel with visible/audible, indexes.
+**M2.5 — Project I/O.** `.go.json` import/export (~50 lines). Lands here, not M7: it de-risks `Map` serialization and index-rebuild-on-load — the likeliest late-breaking schema bug — and gives every later milestone real fixtures instead of hardcoded ones.
 
-**M4 — Playback.** Scheduler, smplr GM placeholders, playhead, loop, audition-on-place.
+**M3 — Editing.** Two stores + command stack, place/remove/move/resize/paint, click-vs-drag threshold, subdivision editor, layer panel with visible/audible, inspector, `effectiveVelocity()` as a pure function, off-grid flagging, and a one-shot preview sampler for audition (which also forces the AudioContext first-gesture unlock to be designed now rather than discovered at M4). Property test: a random command sequence plus N undos returns to the initial project.
+
+**M4 — Playback.** Worker-timer scheduler, transport UI, playhead with latency compensation, loop, full audition. Tested against an injected fake clock asserting scheduled onset seconds.
 
 **M5 — Velocity.** Lane rendering, drag painting, per-note alt-drag, split bars.
 
-**M6 — Instruments & kits.** Manifest loader, kit gutter labels, four starter layers wired.
+**M6 — Instruments & kits.** Manifest loader, `CacheStorage`, load-progress UI, kit gutter labels, four starter manifests wired.
 
-**M7 — Persistence & export.** IndexedDB autosave, `.go.json` import/export, MIDI export with PPQ selection.
+**M7 — Persistence & export.** IndexedDB autosave, MIDI export with PPQ selection, round-trip test (export → parse → compare within tick tolerance).
 
-Each milestone is independently demoable; M1 ships as a pure library with tests before any pixel is drawn.
+Each milestone is independently demoable; M1 ships as a pure library with tests before any pixel is drawn. Playwright covers two or three smoke flows only — everything else above is headless.
