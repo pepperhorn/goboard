@@ -1,0 +1,17 @@
+:root {
+  font-family: Poppins, ui-sans-serif, system-ui, sans-serif;
+  color-scheme: light dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root { height: 100%; margin: 0; }
+
+.app-shell {
+  display: flex;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+}
+
+.app-placeholder { opacity: 0.5; font-weight: 500; }
