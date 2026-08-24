@@ -217,7 +217,8 @@
  * ---------------------------------------------------------------------- */
 
 .layer-panel {
-  width: 260px;
+  /* The shell owns the column width (§2); the panel fills whatever it is given. */
+  width: 100%;
   flex: 1 1 auto;
 }
 
@@ -380,6 +381,8 @@
 
 .layer-panel__foot {
   display: flex;
+  /* Three buttons in a 232 px column: let them wrap rather than run off the edge. */
+  flex-wrap: wrap;
   gap: 4px;
   padding: 6px;
   background: var(--go-surface-sunken);
@@ -389,8 +392,12 @@
 
 .layer-panel__foot .chrome-btn {
   flex: 1 1 auto;
+  min-width: 0;
   padding: 0 6px;
   font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* --------------------------------------------------------------------------
@@ -516,7 +523,7 @@
  * ---------------------------------------------------------------------- */
 
 .inspector {
-  width: 260px;
+  width: 100%;
   flex: 0 0 auto;
   gap: 0;
 }

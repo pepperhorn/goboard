@@ -27,20 +27,28 @@ export const deviceRatio = (): number => Math.min(window.devicePixelRatio || 1, 
  * must be followed by a full redraw — never a partial one.
  */
 export function sizeSurface(surface: Surface, dpr: number): boolean {
-  const rect = surface.canvas.getBoundingClientRect()
-  const cssW = Math.max(1, Math.round(rect.width))
-  const cssH = Math.max(1, Math.round(rect.height))
-  const w = Math.round(cssW * dpr)
-  const h = Math.round(cssH * dpr)
+  const canvas = surface.canvas
+  // Measure the *content* box, not `getBoundingClientRect`'s border box. The ruler
+  // carries a 1 px baseline and the gutter a 1 px edge, and a canvas stretches its
+  // backing store over the content box only — sizing from the border box scales the
+  // ruler by 28/27 and blurs every line in it.
+  //
+  // The CSS size is never written back. Layout owns it (a stylesheet `100%`, a React
+  // inline height), and a write-back is undone by the next render, leaving the backing
+  // store a pixel out of step with the box for as long as the app runs.
+  const cssW = Math.max(1, canvas.clientWidth)
+  const cssH = Math.max(1, canvas.clientHeight)
+  const w = Math.max(1, Math.round(cssW * dpr))
+  const h = Math.max(1, Math.round(cssH * dpr))
 
-  const changed = surface.canvas.width !== w || surface.canvas.height !== h
+  const changed = canvas.width !== w || canvas.height !== h
   if (changed) {
-    surface.canvas.width = w
-    surface.canvas.height = h
-    surface.canvas.style.width = `${cssW}px`
-    surface.canvas.style.height = `${cssH}px`
+    canvas.width = w
+    canvas.height = h
   }
   surface.size = { width: cssW, height: cssH }
+
+  const rect = canvas.getBoundingClientRect()
 
   // Correct for a fractional device-pixel origin so surfaces stay aligned.
   const fx = rect.left * dpr - Math.round(rect.left * dpr)
@@ -49,8 +57,18 @@ export function sizeSurface(surface: Surface, dpr: number): boolean {
   return changed
 }
 
-export function makeSurface(canvas: HTMLCanvasElement): Surface {
-  const ctx = canvas.getContext('2d', { alpha: false })
+/**
+ * `alpha: false` is a real win on the opaque surfaces — the compositor skips a blend
+ * per frame — but context attributes are fixed by the FIRST `getContext` call: asking
+ * again with different attributes silently returns the original context. So a surface
+ * that must composite (the playhead overlay) has to be created transparent *here*, or
+ * its `clearRect` paints opaque black over the board beneath it.
+ */
+export function makeSurface(
+  canvas: HTMLCanvasElement,
+  options: { readonly alpha?: boolean } = {},
+): Surface {
+  const ctx = canvas.getContext('2d', { alpha: options.alpha ?? false })
   if (!ctx) throw new Error('canvasHost: 2d context unavailable')
   return { canvas, ctx, size: { width: 1, height: 1 } }
 }

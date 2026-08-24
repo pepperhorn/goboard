@@ -68,9 +68,9 @@ export function BoardView(props: BoardViewProps): React.ReactElement {
     const gutter = makeSurface(gutterCanvas)
     const ruler = makeSurface(rulerCanvas)
     const main = makeSurface(boardCanvas)
-    const overlay = makeSurface(overlayCanvas)
     // The overlay must composite over the board, so it keeps its alpha channel.
-    const overlayCtx = overlayCanvas.getContext('2d')
+    const overlay = makeSurface(overlayCanvas, { alpha: true })
+    const overlayCtx = overlay.ctx
     const surfaces: Surface[] = [gutter, ruler, main, overlay]
 
     let atlas = new StoneAtlas(1)

@@ -36,8 +36,11 @@ button, input, select {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 232px 1fr;
-  grid-template-rows: 50px 1fr auto;
+  /* Matches the layer panel and inspector's design width. */
+  grid-template-columns: 260px 1fr;
+  /* The transport row sizes to its content: it holds two bars now (file + transport)
+     and wraps on a narrow window, and a fixed height clipped both ends. */
+  grid-template-rows: auto 1fr auto;
   grid-template-areas:
     "transport transport"
     "layers    board"
@@ -56,6 +59,16 @@ button, input, select {
   border-right: 1px solid var(--edge);
   background: var(--panel-bg);
   overflow: hidden;
+}
+
+/*
+ * A column flex item's automatic minimum size is its *content* width, so a panel whose
+ * buttons total 260 px stays 260 px wide inside a 232 px column and spills past the
+ * edge. `min-width: 0` lets the panels take the column's width and wrap their own
+ * contents instead.
+ */
+.app-layers > * {
+  min-width: 0;
 }
 
 /* --- board surfaces --- */
@@ -203,19 +216,28 @@ button, input, select {
 
 /* --- first-gesture audio unlock (§8.2) --- */
 
+/*
+ * §8.2's "click to enable audio" affordance — a floating pill, not a modal scrim.
+ * A full-bleed overlay swallowed every pointer event on the board, so nothing could
+ * be placed until audio was unlocked, contradicting the hint right beneath it. The
+ * container is click-through; only the button takes events.
+ */
 .audio-gate {
   position: absolute;
-  inset: 0;
+  left: 50%;
+  bottom: 20px;
+  transform: translateX(-50%);
   z-index: 30;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  justify-content: center;
-  background: rgba(239, 233, 221, 0.82);
-  backdrop-filter: blur(2px);
+  gap: 6px;
+  pointer-events: none;
 }
 
 .audio-gate__button {
-  padding: 14px 28px;
+  pointer-events: auto;
+  padding: 10px 22px;
   border: 1px solid var(--edge);
   border-radius: 999px;
   background: var(--panel-bg);
@@ -227,10 +249,11 @@ button, input, select {
 .audio-gate__button:hover { background: #fff; }
 
 .audio-gate__hint {
-  position: absolute;
-  bottom: 28%;
   font-size: 12px;
   color: var(--ink-dim);
+  background: rgba(239, 233, 221, 0.86);
+  padding: 2px 8px;
+  border-radius: 999px;
 }
 
 /* --- file bar (§10) --- */
@@ -240,7 +263,7 @@ button, input, select {
   align-items: center;
   gap: 8px;
   min-width: 0;
-  padding: 0 8px;
+  padding: 6px 8px;
 }
 
 .app-transport .transport {

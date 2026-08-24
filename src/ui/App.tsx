@@ -4,6 +4,7 @@ import { toQuarters } from '../core/pos'
 import { pos } from '../core/pos'
 import { createEmptyProject } from '../io/project'
 import { createAutosave, createIdbStore, restoreAutosave } from '../io/autosave'
+import type { Autosave } from '../io/autosave'
 import { createEngine } from '../audio/engine'
 import { createScheduler } from '../audio/scheduler'
 import type { Scheduler } from '../audio/scheduler'
@@ -168,18 +169,19 @@ export function App(): React.ReactElement {
   // --- autosave (§10) ---
 
   const autosaveStore = useMemo(() => createIdbStore(), [])
-  const autosave = useMemo(
-    () =>
-      createAutosave({
-        store: autosaveStore,
-        onSaved: (snap) => uiSet({ savedAt: snap.savedAt, saving: false, isDirty: false }),
-        onError: (err) => uiSet({ saving: false, status: `Autosave failed: ${String(err)}` }),
-      }),
-    [autosaveStore],
-  )
+  // Created inside the effect, not in a `useMemo`: StrictMode mounts, unmounts and
+  // remounts, and a memoized instance survives that cycle — so its own cleanup would
+  // dispose it permanently and every later edit would sit at "Saving…" forever.
+  const autosaveRef = useRef<Autosave | null>(null)
 
   useEffect(() => {
     let live = true
+    const autosave = createAutosave({
+      store: autosaveStore,
+      onSaved: (snap) => uiSet({ savedAt: snap.savedAt, saving: false, isDirty: false }),
+      onError: (err) => uiSet({ saving: false, status: `Autosave failed: ${String(err)}` }),
+    })
+    autosaveRef.current = autosave
 
     // Restore before the first `schedule`, so a fresh empty project cannot overwrite
     // the snapshot it is about to replace.
@@ -219,16 +221,19 @@ export function App(): React.ReactElement {
       unsub()
       void autosave.flush()
       autosave.dispose()
+      if (autosaveRef.current === autosave) autosaveRef.current = null
     }
-  }, [board, autosave, autosaveStore])
+  }, [board, autosaveStore])
 
   /** Replaced document: drop the old snapshot rather than diffing against it. */
   const onProjectReplaced = useCallback(() => {
+    const autosave = autosaveRef.current
+    if (!autosave) return
     void autosave.clear().then(() => {
       uiSet({ savedAt: null, saving: false })
       autosave.schedule(board.getProject())
     })
-  }, [autosave, board])
+  }, [board])
 
   // --- instrument load progress ---
 
