@@ -52,7 +52,8 @@ describe('the denominator lattice', () => {
     // Sum one slot from each of several differently-split columns; the result must
     // still divide L.
     let acc = ZERO
-    for (const [s1, s2] of [[16, 16], [9, 9], [5, 5], [7, 7], [11, 11], [13, 13]]) {
+    const nested: [number, number][] = [[16, 16], [9, 9], [5, 5], [7, 7], [11, 11], [13, 13]]
+    for (const [s1, s2] of nested) {
       acc = add(acc, frac(1, s1 * s2))
     }
     expect(LATTICE % acc.d).toBe(0)

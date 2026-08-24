@@ -104,6 +104,10 @@ Example — 16ths with triplet 32nds on the last 16th:
 
 **Slot enumeration** (used by rendering, hit-testing, velocity lane, and note quantization): walk the tree producing ordered slots `{ start: Frac, dur: Frac }` within the column. For slot *i* of a `split: s` node spanning `[a, b)`, slot span is `[a + i·(b−a)/s, a + (i+1)·(b−a)/s)`. Max slots per column = 256.
 
+Spans are **half-open**: a boundary belongs to the slot it starts. This is normative — hit-testing, the ruler, and the velocity lane all resolve boundaries this way, and disagreeing would put a click on a barline in the wrong slot.
+
+**Canonical form.** A `children` array of all `null`s is equivalent to omitting `children`, and a `{split: 1}` child is equivalent to `null`. Validation preserves the input shape rather than canonicalizing, so **do not compare `Subdiv` values structurally** — undo/redo dedup and persistence diffing must compare enumerated slots, not the tree.
+
 ### 3.3 Tempo map & seconds conversion
 
 ```ts
