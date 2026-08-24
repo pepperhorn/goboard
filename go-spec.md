@@ -206,6 +206,8 @@ Command pattern: every mutation is a `{ do, undo }` pair pushed to a stack (cap 
 type Viewport = { xQuarters: number; yPitch: number; pxPerQuarter: number; pxPerSemitone: number };
 ```
 
+`xQuarters` is the absolute quarter-note position at the board's **left edge**. `yPitch` is the MIDI pitch at the board's **top edge**; pitch increases upward, so the row for pitch *p* occupies screen y in `[(yPitch − p)·pxPerSemitone, (yPitch − p + 1)·pxPerSemitone)`. Both are stated here because the axis inversion is off-by-one-prone and three canvases share the transform.
+
 - Boundless pan in all directions (negative `col` and any MIDI pitch 0–127 allowed; clamp vertical pan to the MIDI range).
 - Zoom: horizontal `pxPerQuarter` 24–512; vertical `pxPerSemitone` 8–48. Pinch/ctrl-wheel zooms about the cursor point.
 - Initial view: C3 (48) vertically centered, col 0 at the left edge, 96 px/quarter, 16 px/semitone.
@@ -306,7 +308,8 @@ Column-level velocity is **time-linear per layer**: all notes in a column stack 
 - **Hit priority is the inverse of draw order:** active layer first, then descending `order`. Otherwise you delete the stone underneath the one you clicked.
 - **Non-active layers are pointer-transparent** — clicks fall through to place on the active layer. Double-click is the only gesture that reaches them.
 - **Same-cell ties** resolve to the shortest duration, then most-recently-added. The command layer forbids two notes with identical `(layer, pitch, pos)`.
-- **Resize hot zone** is `min(6px, stoneWidth * 0.25)` and is disabled below 16 px stone width; at minimum zoom a fixed 6 px zone would swallow the entire 6.8 px stone and make click-to-remove unreachable.
+- **Resize hot zone** is `min(6px, stoneWidth * 0.25)`, disabled below **10 px** stone width. A one-slot stone is `pxPerSemitone × 0.84` wide, so the threshold must sit between minimum zoom (8 px/semitone → 6.7 px wide, where a fixed 6 px zone would swallow the whole stone and make click-to-remove unreachable) and the 16 px/semitone default (13.4 px wide, where resize must work). 10 px separates them; 16 px would disable resize at the default zoom.
+- **Lozenge geometry.** §5.2's "circle centred in its slot" and "stretched to `dur` width" disagree at the crossover, so: the caps are centred on the **first and last slot the note covers**. A one-slot note is then exactly the specified circle, and lengthening a note never shifts its head — centring on the full span would make the head jump left on the first resize step. The drawn right edge, and so the resize zone, therefore sits half a slot short of the note's mathematical end. Hit testing and the renderer share one `noteRect` function so they cannot drift.
 - **Audition on drag** (§8.2) fires only when the quantized pitch changes, and never on a removal click.
 - **Kit layers reject placement** on unmapped rows (§9.3) — the click is a silent no-op, not a pan.
 - **Canvas event hygiene:** `touch-action: none`, `user-select: none`, native context menu suppressed, middle-mousedown default prevented (Linux paste / Windows autoscroll), `wheel` bound with `{passive: false}` on the element (React's `onWheel` cannot reliably `preventDefault` browser page zoom), `e.repeat` filtered on Space, and Space `preventDefault`ed globally so it doesn't activate a focused layer-panel button.

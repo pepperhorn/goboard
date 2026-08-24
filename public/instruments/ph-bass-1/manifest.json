@@ -1,0 +1,15 @@
+{
+  "id": "ph-bass-1",
+  "name": "PepperHorn Bass",
+  "kind": "pitched",
+  "gmProgram": 33,
+  "samples": {
+    "28": "E1",
+    "40": "E2",
+    "52": "E3"
+  },
+  "baseUrl": "/instruments/ph-bass-1",
+  "formats": [
+    "wav"
+  ]
+}

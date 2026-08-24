@@ -1,0 +1,17 @@
+{
+  "id": "ph-piano-1",
+  "name": "PepperHorn Piano",
+  "kind": "pitched",
+  "gmProgram": 0,
+  "samples": {
+    "36": "C2",
+    "48": "C3",
+    "60": "C4",
+    "72": "C5",
+    "84": "C6"
+  },
+  "baseUrl": "/instruments/ph-piano-1",
+  "formats": [
+    "wav"
+  ]
+}

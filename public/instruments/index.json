@@ -1,0 +1,22 @@
+[
+  {
+    "id": "ph-piano-1",
+    "name": "PepperHorn Piano",
+    "kind": "pitched"
+  },
+  {
+    "id": "ph-guitar-1",
+    "name": "PepperHorn Guitar",
+    "kind": "pitched"
+  },
+  {
+    "id": "ph-bass-1",
+    "name": "PepperHorn Bass",
+    "kind": "pitched"
+  },
+  {
+    "id": "ph-kit-1",
+    "name": "PepperHorn Kit",
+    "kind": "kit"
+  }
+]

@@ -1,0 +1,52 @@
+{
+  "id": "ph-kit-1",
+  "name": "PepperHorn Kit",
+  "kind": "kit",
+  "gmBasis": true,
+  "baseUrl": "/instruments/ph-kit-1",
+  "formats": [
+    "wav"
+  ],
+  "pieces": [
+    {
+      "midi": 36,
+      "label": "Kick",
+      "sample": "kick"
+    },
+    {
+      "midi": 38,
+      "label": "Snare",
+      "sample": "snare"
+    },
+    {
+      "midi": 41,
+      "label": "Low Tom",
+      "sample": "tom-low"
+    },
+    {
+      "midi": 42,
+      "label": "HH Cl",
+      "sample": "hh-closed"
+    },
+    {
+      "midi": 45,
+      "label": "Mid Tom",
+      "sample": "tom-mid"
+    },
+    {
+      "midi": 46,
+      "label": "HH Op",
+      "sample": "hh-open"
+    },
+    {
+      "midi": 48,
+      "label": "High Tom",
+      "sample": "tom-high"
+    },
+    {
+      "midi": 49,
+      "label": "Crash",
+      "sample": "crash"
+    }
+  ]
+}

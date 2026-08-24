@@ -1,0 +1,16 @@
+{
+  "id": "ph-guitar-1",
+  "name": "PepperHorn Guitar",
+  "kind": "pitched",
+  "gmProgram": 25,
+  "samples": {
+    "40": "E2",
+    "52": "E3",
+    "64": "E4",
+    "76": "E5"
+  },
+  "baseUrl": "/instruments/ph-guitar-1",
+  "formats": [
+    "wav"
+  ]
+}

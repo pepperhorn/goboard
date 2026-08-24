@@ -45,8 +45,13 @@ function overlaps(note: Note, from: Pos, to: Pos): boolean {
   return pcmp(endOf(note), from) > 0
 }
 
-/** First index in a pos-sorted array whose `pos` is `>= p`. */
-function lowerBoundByPos(notes: readonly Note[], p: Pos): number {
+/**
+ * First index in a pos-sorted array whose `pos` is `>= p`.
+ *
+ * Exported because the scheduler re-searches `notesByLayer` from its `Pos` cursor on
+ * every tick (§8.1) and must agree with this index's ordering exactly.
+ */
+export function lowerBoundByPos(notes: readonly Note[], p: Pos): number {
   let lo = 0
   let hi = notes.length
   while (lo < hi) {

@@ -9,7 +9,8 @@
     "preview": "vite preview --host 0.0.0.0",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc -b --noEmit"
+    "typecheck": "tsc -b --noEmit",
+    "gen:samples": "node scripts/gen-samples.mjs"
   },
   "dependencies": {
     "react": "^19.2.8",

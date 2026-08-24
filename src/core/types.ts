@@ -35,3 +35,36 @@ export type Note = {
   readonly pitch: number
   readonly vel?: number
 }
+
+/**
+ * One layer: an instrument, its board appearance, and the per-column state (§4).
+ * `colVel` and `subdivs` are keyed by `col`; an absent entry means the layer default
+ * (`defaultVel`, and `{split:1}` — one slot per quarter).
+ */
+export type Layer = {
+  readonly id: LayerId
+  readonly name: string
+  readonly color: string
+  readonly instrumentId: string
+  /** MIDI export channel, 0-indexed: the spec's "channel 10" for drums is 9 here. */
+  readonly channel: number
+  /** Mute is `!audible`; `visible` is independent of it — all four combinations are legal. */
+  readonly audible: boolean
+  readonly visible: boolean
+  readonly defaultVel: number
+  readonly colVel: Map<number, number>
+  readonly subdivs: Map<number, Subdiv>
+  /** Z-order in the layer panel and draw order. */
+  readonly order: number
+}
+
+/** A whole project — the storage form. Runtime indexes (§4.1) are rebuilt on load. */
+export type Project = {
+  readonly version: 1
+  readonly name: string
+  readonly tempoMap: readonly TempoEvent[]
+  readonly layers: readonly Layer[]
+  readonly notes: readonly Note[]
+  readonly activeLayerId: LayerId
+  readonly loop?: { readonly start: Pos; readonly end: Pos }
+}
