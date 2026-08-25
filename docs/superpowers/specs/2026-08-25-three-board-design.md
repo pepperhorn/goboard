@@ -8,9 +8,16 @@
 
 ## 1. Why
 
-Two mockups set the target: a perspective board of glowing stones on a lavender field, and
-a synthwave grid whose coloured cells happen to be exactly the subdivision language we
-need. The current board is a flat 2D canvas, stones sit *in cells* rather than on
+Three mockups set the target, kept in `docs/design-refs/`:
+
+- `board-perspective-lavender.png` — the board itself: glowing stones on a receding
+  lavender grid. (Its stones sit in cells; ours sit on intersections.)
+- `theme-zen-garden.png` — matte stone, engraved hairlines, daylight, moss and sand.
+- `theme-synthwave.png` — emissive grid on dark ground, sunset backdrop, and coloured
+  cells that are already the subdivision language we need.
+
+Both theme references draw a finite slab with an edge; the board is boundless, so neither
+may be copied literally (§4.4). The current board is a flat 2D canvas, stones sit *in cells* rather than on
 intersections, and the subdivision model cannot express note values coarser than a
 quarter.
 
@@ -264,7 +271,7 @@ lighting   key / fill / ambient, bloom on|off
 camera     default tilt, FOV, zoom limits
 ```
 
-Two themes ship, one per reference mockup:
+Two themes ship, one per reference in `docs/design-refs/`:
 
 - **Zen** — matte stone, engraved hairlines, daylight key/fill, sand-and-moss backdrop.
 - **Neon** — emissive grid on dark ground, flat rimmed stones, sunset backdrop, bloom.
