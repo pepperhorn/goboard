@@ -305,6 +305,14 @@ const crisp = (v: number, dpr: number): number => px(v, dpr) + 0.5 / dpr
  * The walk starts at `cursor.slotAt(from).start`, which may lie left of the visible
  * span: a whole-note slot beginning three columns off-screen still has most of its cell
  * on screen, and skipping it (as a gridline pass legitimately does) would leave a hole.
+ *
+ * **The note query is bounded by the SLOTS, not by the columns.** Both edges: the first
+ * slot can start left of `start`, and the last slot — the one containing `to` — can end
+ * arbitrarily far right of `end`. Querying `[start, end + 1)` would silently drop the
+ * notes of a coarse slot whose head is on screen and whose tail is not, and that slot
+ * would then render as a ghost at the layer default instead of as a bar. A column-scoped
+ * loop could not make that mistake; a slot-scoped one can, so the bound is derived from
+ * the walk's own endpoints.
  */
 export function drawLane(
   ctx: CanvasRenderingContext2D,
@@ -323,8 +331,13 @@ export function drawLane(
   const cursor = createGridCursor(scene.grid)
   const from = makePos(start)
   const to = makePos(end)
-  // The leftmost cell may begin before the viewport; its notes begin there too.
+  // The leftmost cell may begin before the viewport; its notes begin there too. The
+  // rightmost cell is the slot containing `to` — the walk runs while `at <= to` and
+  // steps contiguously, so that slot is the last one it visits — and it may end well
+  // past `end`. Two O(1) cursor probes give both edges; `reset` puts the cursor back
+  // at the sentinel so the draw walk below starts from `first` with a forward step.
   const first = cursor.slotAt(from).start
+  const lastCol = slotColumns(cursor.slotAt(to)).toCol
   cursor.reset()
 
   // Onsets only: a note's bar sits in the slot it starts in, so unlike the board this
@@ -332,7 +345,7 @@ export function drawLane(
   // head, and cannot reach in from the left.
   const byslot = bucketBySlot(
     scene.grid,
-    scene.notesInRange(Math.min(first.col, start), end + 1),
+    scene.notesInRange(Math.min(first.col, start), Math.max(end + 1, lastCol)),
   )
 
   const rules = new Path2D()
@@ -424,6 +437,22 @@ export function drawLane(
  * The end column is computed in integers, deliberately. `ceil(toQuarters(...))` looks
  * equivalent and is not: `toQuarters` is a float, and a value like `1/3` lands on the
  * wrong side of a boundary often enough to matter (§3.1 — no float decides a column).
+ *
+ * **Known limitation, deliberate — do not "fix" this by changing where velocity is
+ * stored.** Under an *off-phase coarse* grid, consecutive slots cover OVERLAPPING column
+ * ranges. A region `{start: pos(0,1,2), value: 1}` gives slots `[0.5, 1.5)` and
+ * `[1.5, 2.5)`, covering columns 0–1 and 1–2 respectively; column 1 belongs to both. So
+ * a lane edit on the first slot also moves the *displayed* value of the second, since a
+ * slot displays what is stored at its starting column (`laneVelocities.ghostOf`).
+ *
+ * That is a direct consequence of design §3.4's two halves — "storage stays
+ * column-keyed" and "a lane edit writes every column the slot covers" — and not of this
+ * function. Making it exact would need slot-keyed velocity storage, which is a model
+ * change: it would disturb §6.1's `note.vel → colVel → defaultVel` resolution order,
+ * which the scheduler owns, and the on-disk project format, which is column-keyed. Both
+ * are far outside this plan. The overlap only arises for a grid coarser than a quarter
+ * AND anchored off a column boundary; on-phase grids of any coarseness partition the
+ * columns cleanly and have no overlap at all.
  */
 export function slotColumns(slot: LaneSlot): { fromCol: number; toCol: number } {
   const end = posAdd(slot.start, slot.dur)

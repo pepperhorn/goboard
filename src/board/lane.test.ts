@@ -122,9 +122,19 @@ describe('laneSlotAt', () => {
   it('handles negative columns, since the board is boundless', () => {
     const regions: readonly GridRegion[] = [{ start: pos(-4), value: frac(1, 4) }]
     expect(laneSlotAt(vp, cursorOn(regions), -1)?.start).toEqual(pos(-1, 3, 4))
-    // Left of every region the implicit default governs — still a real slot, and its
-    // duration is clipped by the first region's start rather than overrunning it.
-    expect(laneSlotAt(vp, cursorOn(SIXTEENTHS), -1)).toEqual({ start: pos(-1), dur: frac(1) })
+  })
+
+  it('governs the space left of every region with the implicit default, clipped', () => {
+    // Anchored MID-column, so the clip is real rather than incidental: a region
+    // starting on a column boundary would end the default slot where it ended anyway.
+    const late: readonly GridRegion[] = [{ start: pos(0, 1, 2), value: frac(1, 4) }]
+    // Well left of the region: the implicit one-slot-per-quarter default, uncut.
+    expect(laneSlotAt(vp, cursorOn(late), -1)).toEqual({ start: pos(-1), dur: frac(1) })
+    // The default slot that runs INTO the region is cut short at the region's start —
+    // half a quarter, not a whole one — and that clipped slot is a real, editable slot.
+    expect(laneSlotAt(vp, cursorOn(late), 10)).toEqual({ start: pos(0), dur: frac(1, 2) })
+    // ...and the region's own phase starts there, at its own value.
+    expect(laneSlotAt(vp, cursorOn(late), 60)).toEqual({ start: pos(0, 1, 2), dur: frac(1, 4) })
   })
 
   it('respects a panned/zoomed viewport rather than deriving its own', () => {
@@ -390,12 +400,12 @@ const stubCtx = (): CanvasRenderingContext2D =>
   }) as unknown as CanvasRenderingContext2D
 
 /** Run one lane frame and hand back the two paths the assertions care about. */
-function paint(scene: LaneScene, size = { width: 384, height: 96 }) {
+function paint(scene: LaneScene, size = { width: 384, height: 96 }, view: Viewport = vp) {
   const prev = (globalThis as { Path2D?: unknown }).Path2D
   ;(globalThis as { Path2D?: unknown }).Path2D = StubPath
   StubPath.made = []
   try {
-    const drawn = drawLane(stubCtx(), vp, size, scene, 1)
+    const drawn = drawLane(stubCtx(), view, size, scene, 1)
     // Construction order inside `drawLane`: rules, bars, ghosts, caps.
     return { drawn, bars: StubPath.made[1]!, ghosts: StubPath.made[2]! }
   } finally {
@@ -448,18 +458,58 @@ describe('drawLane over grid regions', () => {
   it('draws the cell of a slot that starts left of the viewport', () => {
     // Panned so the visible span opens mid-way through a whole-note slot.
     const grid: readonly GridRegion[] = [{ start: pos(0), value: frac(4) }]
-    const scene = laneScene({ grid, showGhosts: true })
-    const prevPath = (globalThis as { Path2D?: unknown }).Path2D
-    ;(globalThis as { Path2D?: unknown }).Path2D = StubPath
-    StubPath.made = []
-    try {
-      drawLane(stubCtx(), { ...vp, xQuarters: 2 }, { width: 384, height: 96 }, scene, 1)
-    } finally {
-      ;(globalThis as { Path2D?: unknown }).Path2D = prevPath
-    }
-    const ghosts = StubPath.made[2]!
+    const { ghosts } = paint(
+      laneScene({ grid, showGhosts: true }),
+      { width: 384, height: 96 },
+      { ...vp, xQuarters: 2 },
+    )
     // The slot starting at column 0 is off-screen to the left but its cell is not.
     expect(ghosts.rects[0]!.x).toBeLessThan(0)
+  })
+
+  it('fetches the notes of a slot whose tail runs past the visible columns', () => {
+    // The regression: `visibleCols` gives {start: 0, end: 5} here, but the last slot
+    // the walk draws is [4, 8) — its notes live in columns the old `end + 1` query
+    // never reached, so the cell rendered as a ghost at the layer default instead of
+    // as a bar at the note's own velocity. A column-scoped loop could not do this.
+    const panned: Viewport = { ...vp, xQuarters: 0.5 }
+    const grid: readonly GridRegion[] = [{ start: pos(0), value: frac(4) }]
+    const loud = note({ pos: pos(6), dur: frac(1), vel: 20 })
+    const range: number[] = []
+    const scene = laneScene({
+      grid,
+      showGhosts: true,
+      notesInRange: (s0, e0) => {
+        range.push(s0, e0)
+        // Stand in for `NoteIndex.queryRange`: half-open on the column.
+        return loud.pos.col >= s0 && loud.pos.col < e0 ? [loud] : []
+      },
+    })
+    const { bars, ghosts } = paint(scene, { width: 384, height: 96 }, panned)
+
+    // The query must reach column 6, which is past `end + 1 === 6`.
+    expect(range[1]).toBeGreaterThan(6)
+    // Slot [0,4) is empty -> one ghost; slot [4,8) holds the note -> one bar at vel 20.
+    expect(ghosts.rects).toHaveLength(1)
+    expect(bars.rects).toHaveLength(1)
+    expect(bars.rects[0]!.y).toBe(Math.round(velocityToY(96, 20)))
+    // ...and NOT a ghost at the layer default, which is what the bug produced.
+    expect(bars.rects[0]!.y).not.toBe(Math.round(velocityToY(96, 80)))
+  })
+
+  it('still reaches left when the coarse slot runs the other way', () => {
+    // The left edge must not regress while the right one is fixed: `Math.min`/`Math.max`
+    // widen independently.
+    const grid: readonly GridRegion[] = [{ start: pos(0), value: frac(4) }]
+    const early = note({ pos: pos(0), dur: frac(1), vel: 20 })
+    const scene = laneScene({
+      grid,
+      showGhosts: true,
+      notesInRange: (s0, e0) => (early.pos.col >= s0 && early.pos.col < e0 ? [early] : []),
+    })
+    const { bars } = paint(scene, { width: 384, height: 96 }, { ...vp, xQuarters: 2 })
+    expect(bars.rects).toHaveLength(1)
+    expect(bars.rects[0]!.y).toBe(Math.round(velocityToY(96, 20)))
   })
 
   it('draws a clipped slot as a real, narrower cell', () => {
