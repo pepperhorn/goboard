@@ -74,10 +74,26 @@ describe('barNumberAt', () => {
   })
 })
 
+/** The grid ladder's triplet values (`gridValue.ts`'s presets) — none is a legal `beatUnit`. */
+const TRIPLET_BEAT_UNITS: readonly { n: number; d: number }[] = [
+  { n: 1, d: 3 },
+  { n: 2, d: 3 },
+  { n: 4, d: 3 },
+  { n: 1, d: 6 },
+  { n: 1, d: 12 },
+]
+
 describe('validateMeter', () => {
   it('rejects a beatUnit whose SMF denominator is not a power of two', () => {
     expect(() => validateMeter({ pos: { col: 0, frac: { n: 0, d: 1 } }, beatUnit: { n: 1, d: 3 }, groups: [3] }, 'm'))
       .toThrow(/power of two/)
+  })
+
+  it('rejects every grid-ladder triplet value as a beatUnit', () => {
+    for (const beatUnit of TRIPLET_BEAT_UNITS) {
+      expect(() => validateMeter({ pos: { col: 0, frac: { n: 0, d: 1 } }, beatUnit, groups: [3] }, 'm'))
+        .toThrow(/power of two/)
+    }
   })
 
   it('rejects empty or non-positive groups', () => {
@@ -111,6 +127,12 @@ describe('midiDenominator', () => {
   it('rejects a beat unit whose denominator is not a power of two', () => {
     expect(() => midiDenominator(frac(1, 3))).toThrow(/power of two/)
   })
+
+  it('rejects every grid-ladder triplet value', () => {
+    for (const { n, d } of TRIPLET_BEAT_UNITS) {
+      expect(() => midiDenominator(frac(n, d))).toThrow(/power of two/)
+    }
+  })
 })
 
 describe('buildMeterMap', () => {
@@ -137,6 +159,28 @@ describe('buildMeterMap', () => {
   it('rejects an out-of-order list', () => {
     const map = [{ ...sevenEight, pos: pos(8) }, fourFour]
     expect(() => buildMeterMap(map)).toThrow(RangeError)
+  })
+})
+
+describe('a map must be anchored at or before the origin', () => {
+  it('rejects a raw meter list whose first entry starts after column 0, instead of back-extrapolating it', () => {
+    // If this were allowed through, `barLinesIn` would extrapolate the 6/8 meter
+    // backward from col 4 (bar lines at ..., -2, 1, 4, ...) rather than bounding
+    // everything before col 4 with an implicit default.
+    const late = { ...sixEight, pos: pos(4) }
+    expect(() => barLinesIn([late], pos(0), pos(8))).toThrow(/anchored|buildMeterMap/)
+    expect(() => groupLinesIn([late], pos(0), pos(8))).toThrow(/anchored|buildMeterMap/)
+    expect(() => barNumberAt([late], pos(0))).toThrow(/anchored|buildMeterMap/)
+  })
+
+  it('is normalised by buildMeterMap rather than left to extrapolate', () => {
+    const late = { ...sixEight, pos: pos(4) }
+    const built = buildMeterMap([late])
+    // Before col 4, the implicit 4/4 default governs (bar lines at 0, 4), not 6/8
+    // extrapolated backward from col 4 (which would place one at col 1).
+    expect(barLinesIn(built, pos(0), pos(4))).toEqual([pos(0), pos(4)])
+    // From col 4 onward, the declared 6/8 meter (bar length 3) takes over.
+    expect(barLinesIn(built, pos(4), pos(10))).toEqual([pos(4), pos(7), pos(10)])
   })
 })
 

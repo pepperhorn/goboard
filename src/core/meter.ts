@@ -9,7 +9,7 @@ import {
   normalize,
   toString as fracToString,
 } from './frac'
-import { add as padd, canonicalize, cmp as pcmp, diff as pdiff, pos } from './pos'
+import { ORIGIN, add as padd, canonicalize, cmp as pcmp, diff as pdiff, pos } from './pos'
 
 /**
  * The meter map: bar lines, bar numbers and MIDI time signatures. See design §3.7.
@@ -112,14 +112,14 @@ export function validateMeter(v: unknown, where: string): Meter {
   for (let i = 0; i < raw.groups.length; i++) {
     const g: unknown = raw.groups[i]
     if (typeof g !== 'number' || !Number.isInteger(g) || g <= 0) {
-      throw new RangeError(`${where}.groups[${i}]: must be a positive integer, got ${describe(g)}`)
+      throw new RangeError(`${where}.groups[${i}]: must be a positive integer, got ${describeValue(g)}`)
     }
     groups.push(g)
   }
   return { pos: at, beatUnit, groups }
 }
 
-function describe(v: unknown): string {
+function describeValue(v: unknown): string {
   if (v === null) return 'null'
   if (Array.isArray(v)) return 'an array'
   return typeof v
@@ -150,6 +150,13 @@ export function midiDenominator(beatUnit: Frac): number {
  * of meters — the same shape `buildTempoMap` gives `tempoMap` (`tempo.ts`). An implicit
  * `DEFAULT_METER` is prepended unless the caller already supplies one at or before
  * col 0.
+ *
+ * This is also where the bar-arithmetic precondition below is established: every
+ * function in the "Bar arithmetic" section requires `map[0].pos` to be at or before
+ * the origin, and this is the only place that guarantee is produced. A meter list
+ * read from disk (or built by hand) must be passed through here before it reaches
+ * `barLinesIn`, `groupLinesIn` or `barNumberAt` — passing a raw list straight through
+ * throws rather than silently extrapolating (see `assertAnchored`).
  */
 export function buildMeterMap(events: readonly Meter[]): readonly Meter[] {
   const kept: Meter[] = []
@@ -200,6 +207,30 @@ function barLength(m: Meter): Frac {
     throw new RangeError('Meter: bar length must be positive — malformed meter reached the bar walk')
   }
   return length
+}
+
+/**
+ * Precondition of every function below: `map[0].pos` must be at or before the origin.
+ *
+ * `meterIndexAt` clamps an out-of-range query to index 0 rather than returning a
+ * sentinel the way `regionIndexAt` (`grid.ts`) returns `-1` for "before the first
+ * region" — there is no implicit default meter to fall back on the way grid regions
+ * fall back on `DEFAULT_GRID_VALUE`, only `map[0]` itself, extrapolated backward by
+ * arithmetic. That is safe *only* because `buildMeterMap` guarantees `map[0].pos` is
+ * at or before column 0, so no in-piece query (which never precedes column 0) can
+ * land before it. A raw meter list that skips `buildMeterMap` — e.g. a `.go.json`
+ * `meterMap` whose first entry starts at `pos(4)` — would otherwise have that first
+ * meter silently extrapolated backward instead of being bounded by an implicit
+ * default. This assertion turns that into a thrown error instead.
+ */
+function assertAnchored(map: readonly Meter[], fn: string): void {
+  if (map.length === 0) throw new RangeError(`${fn}: meter map is empty`)
+  if (pcmp(map[0]!.pos, ORIGIN) > 0) {
+    throw new RangeError(
+      `${fn}: meter map is not anchored at or before the origin (first meter at col ` +
+        `${map[0]!.pos.col}) — pass it through buildMeterMap first`,
+    )
+  }
 }
 
 /** Index of the meter governing `at`: the last one with `pos <= at`, clamped to 0. */
@@ -259,9 +290,14 @@ function advanceBar(map: readonly Meter[], i: number, barStart: Pos): { i: numbe
   return { i, pos: natural }
 }
 
-/** Every bar line in `[from, to]`, in order. Thick lines in the §3.7 rendering. */
+/**
+ * Every bar line in `[from, to]`, in order. Thick lines in the §3.7 rendering.
+ *
+ * Precondition: `map[0].pos` must be at or before the origin — build `map` with
+ * `buildMeterMap` first. See `assertAnchored`.
+ */
 export function barLinesIn(map: readonly Meter[], from: Pos, to: Pos): Pos[] {
-  if (map.length === 0) throw new RangeError('barLinesIn: meter map is empty')
+  assertAnchored(map, 'barLinesIn')
   const out: Pos[] = []
   let i = meterIndexAt(map, from)
   let barStart = barStartAt(map, i, from)
@@ -278,9 +314,12 @@ export function barLinesIn(map: readonly Meter[], from: Pos, to: Pos): Pos[] {
  * Every internal group start in `[from, to]`, in order — medium lines in the §3.7
  * rendering. Offset 0 (the bar start) is never included, so a bar line is never also
  * reported as a group line.
+ *
+ * Precondition: `map[0].pos` must be at or before the origin — build `map` with
+ * `buildMeterMap` first. See `assertAnchored`.
  */
 export function groupLinesIn(map: readonly Meter[], from: Pos, to: Pos): Pos[] {
-  if (map.length === 0) throw new RangeError('groupLinesIn: meter map is empty')
+  assertAnchored(map, 'groupLinesIn')
   const out: Pos[] = []
   let i = meterIndexAt(map, from)
   let barStart = barStartAt(map, i, from)
@@ -310,9 +349,14 @@ function beatOfOffset(m: Meter, offset: Frac): number {
   return m.groups.length
 }
 
-/** The bar number (from 1 at the origin) and felt beat (from 1) containing `at`. */
+/**
+ * The bar number (from 1 at the origin) and felt beat (from 1) containing `at`.
+ *
+ * Precondition: `map[0].pos` must be at or before the origin — build `map` with
+ * `buildMeterMap` first. See `assertAnchored`.
+ */
 export function barNumberAt(map: readonly Meter[], at: Pos): { bar: number; beat: number } {
-  if (map.length === 0) throw new RangeError('barNumberAt: meter map is empty')
+  assertAnchored(map, 'barNumberAt')
   const i = meterIndexAt(map, at)
 
   // Bars contributed by every earlier meter segment. A segment cut short by the next
