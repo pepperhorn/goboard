@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { frac } from '../core/frac'
+import type { GridRegion } from '../core/grid'
+import type { Meter } from '../core/meter'
 import { pos } from '../core/pos'
-import { gridlineXs } from './grid'
+import { barLineXs, drawGridlines, gridlineXs, groupLineXs } from './grid'
 
 const vp = { xQuarters: 0, yPitch: 60, pxPerQuarter: 96, pxPerSemitone: 16 }
 const size = { width: 384, height: 300 }
@@ -20,5 +22,95 @@ describe('gridlineXs', () => {
   it('drops lines closer together than 4px, per §5.3 guard 6', () => {
     const dense = [{ start: pos(0), value: frac(1, 32) }] // 3px at this zoom
     expect(gridlineXs(vp, size, dense)).toEqual([0, 96, 192, 288, 384])
+  })
+})
+
+describe('barLineXs', () => {
+  it('puts the heavy line on beat one of each bar', () => {
+    const meter = [{ pos: pos(0), beatUnit: frac(1, 2), groups: [3, 3] }]
+    expect(barLineXs(vp, size, meter)).toEqual([0, 288]) // every 3 quarters at 96px
+  })
+})
+
+describe('groupLineXs', () => {
+  it('marks the internal felt-beat boundary, excluding the bar start', () => {
+    const meter = [{ pos: pos(0), beatUnit: frac(1, 2), groups: [3, 3] }]
+    expect(groupLineXs(vp, size, meter)).toEqual([144]) // 1.5 quarters in, at 96px/quarter
+  })
+})
+
+// --- drawGridlines: three weights, bar/group lines immune to the density guard ----
+
+/**
+ * `drawGridlines` batches into `Path2D`, which the node test environment has no
+ * implementation of (same situation `lane.test.ts` solves for `drawLane`). Recording
+ * the x's passed to `moveTo` gives the test what it needs: which weight bucket each
+ * line landed in.
+ */
+class RecordingPath {
+  static made: RecordingPath[] = []
+  readonly xs: number[] = []
+  constructor() {
+    RecordingPath.made.push(this)
+  }
+  moveTo(x: number): void {
+    this.xs.push(x)
+  }
+  lineTo(): void {}
+}
+
+const stubCtx = (): CanvasRenderingContext2D =>
+  ({
+    strokeStyle: '',
+    lineWidth: 1,
+    stroke: () => {},
+  }) as unknown as CanvasRenderingContext2D
+
+/** Run one `drawGridlines` frame and hand back the three weight paths, in construction order. */
+function paintGridlines(regions: readonly GridRegion[], meterMap: readonly Meter[]) {
+  const prev = (globalThis as { Path2D?: unknown }).Path2D
+  ;(globalThis as { Path2D?: unknown }).Path2D = RecordingPath
+  RecordingPath.made = []
+  try {
+    drawGridlines(stubCtx(), vp, size, regions, meterMap, 1)
+    // Construction order inside `drawGridlines`: bars, groups, intersections.
+    return {
+      bars: RecordingPath.made[0]!,
+      groups: RecordingPath.made[1]!,
+      intersections: RecordingPath.made[2]!,
+    }
+  } finally {
+    ;(globalThis as { Path2D?: unknown }).Path2D = prev
+  }
+}
+
+/**
+ * `drawGridlines` snaps every x to a crisp device pixel (`crisp`, §5.3): at `dpr` 1
+ * that is `Math.round(x) + 0.5`. The `barLineXs` / `groupLineXs` helpers return the
+ * un-snapped logical x, so comparisons below re-apply the same offset.
+ */
+const crisp1 = (x: number): number => Math.round(x) + 0.5
+
+describe('drawGridlines', () => {
+  it('draws every bar line from the meter, even one the layer grid never lands on', () => {
+    const meter: Meter[] = [{ pos: pos(0), beatUnit: frac(1, 2), groups: [3, 3] }] // 3-quarter bars
+    // A grid spaced every 5 quarters: its own slots are 0, 5, 10... — never col 3,
+    // where the meter's second bar line falls. If bar lines were filtered through
+    // this grid's slot starts (the pre-Task-12 approach), the col-3 line would be
+    // silently dropped instead of drawn.
+    const regions: GridRegion[] = [{ start: pos(0), value: frac(5) }]
+    const { bars } = paintGridlines(regions, meter)
+    expect(bars.xs).toEqual(barLineXs(vp, size, meter).map(crisp1))
+    expect(bars.xs).toContain(crisp1(288))
+  })
+
+  it('classifies group lines separately from bar and intersection lines', () => {
+    const meter: Meter[] = [{ pos: pos(0), beatUnit: frac(1, 2), groups: [3, 3] }]
+    const regions: GridRegion[] = [{ start: pos(0), value: frac(1, 2) }]
+    const { bars, groups, intersections } = paintGridlines(regions, meter)
+    expect(bars.xs).toEqual(barLineXs(vp, size, meter).map(crisp1))
+    expect(groups.xs).toEqual(groupLineXs(vp, size, meter).map(crisp1))
+    // Every other eighth-note slot in [0, 4] quarters, minus the bar and group lines.
+    expect(intersections.xs).toEqual([48, 96, 192, 240, 336, 384].map(crisp1))
   })
 })

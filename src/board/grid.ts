@@ -1,8 +1,10 @@
-import type { Frac } from '../core/types'
-import { isZero as fracIsZero, mul as fracMul, toNumber as fracToNumber, frac } from '../core/frac'
+import type { Frac, Pos } from '../core/types'
+import { mul as fracMul, toNumber as fracToNumber, frac } from '../core/frac'
 import type { GridRegion } from '../core/grid'
 import { DEFAULT_GRID_VALUE, slotStartsIn } from '../core/grid'
-import { pos, toQuarters } from '../core/pos'
+import type { Meter } from '../core/meter'
+import { barLinesIn, groupLinesIn } from '../core/meter'
+import { key as posKey, pos, toQuarters } from '../core/pos'
 import { isWhiteKey, theme } from './theme'
 import {
   pitchToY, quartersToX, visibleCols, visiblePitches,
@@ -65,6 +67,22 @@ export function gridlineXs(vp: Viewport, size: Size, regions: readonly GridRegio
   return slotStartsIn(effective, from, to).map((p) => quartersToX(vp, toQuarters(p)))
 }
 
+/**
+ * Every x a bar line falls at, across the visible span (§3.7). Driven entirely by
+ * `meterMap`, not by the active layer's grid — a bar line is not subject to the 4px
+ * density guard `effectiveRegions` applies to the fine subdivision grid.
+ */
+export function barLineXs(vp: Viewport, size: Size, meterMap: readonly Meter[]): number[] {
+  const { start, end } = visibleCols(vp, size)
+  return barLinesIn(meterMap, pos(start), pos(end)).map((p) => quartersToX(vp, toQuarters(p)))
+}
+
+/** Every x an internal group (felt-beat) line falls at, across the visible span (§3.7). */
+export function groupLineXs(vp: Viewport, size: Size, meterMap: readonly Meter[]): number[] {
+  const { start, end } = visibleCols(vp, size)
+  return groupLinesIn(meterMap, pos(start), pos(end)).map((p) => quartersToX(vp, toQuarters(p)))
+}
+
 export function drawRows(ctx: CanvasRenderingContext2D, vp: Viewport, size: Size): void {
   ctx.fillStyle = theme.boardBg
   ctx.fillRect(0, 0, size.width, size.height)
@@ -93,18 +111,23 @@ export function drawRows(ctx: CanvasRenderingContext2D, vp: Viewport, size: Size
 }
 
 /**
- * Gridlines for the active layer's grid (§5.2 pass 2, §5.3 guard 6).
+ * Gridlines for the active layer's grid (§5.2 pass 2, §5.3 guard 6, §3.7).
  *
- * Every intersection of `regions`' active grid draws a line, batched by weight: bar
- * (`col % 4 === 0` — Task 12 replaces this with the meter map), quarter, and
- * sub-quarter. `gridlineXs` already drops anything that would draw closer than 4px
- * apart, so there is no separate zoom gate here.
+ * Three weights, in ascending prominence: intersection (`theme.gridLineSub`), group
+ * (`theme.gridLine`), bar (`theme.gridLineBar`, heaviest). Bar and group lines come
+ * from `meterMap` via `barLinesIn` / `groupLinesIn`, drawn as their own paths —
+ * `effectiveRegions`' 4px density guard governs only the fine subdivision grid
+ * (`regions`), never the meter: a bar line must never be dropped just because the
+ * active layer's grid is dense at this zoom. A position in `regions`' grid that
+ * coincides with a bar or group line is drawn once, at the heavier weight, rather
+ * than doubled up as an intersection line too.
  */
 export function drawGridlines(
   ctx: CanvasRenderingContext2D,
   vp: Viewport,
   size: Size,
   regions: readonly GridRegion[],
+  meterMap: readonly Meter[],
   dpr: number,
 ): void {
   const { start, end } = visibleCols(vp, size)
@@ -113,22 +136,34 @@ export function drawGridlines(
   const effective = effectiveRegions(vp, regions)
   const starts = slotStartsIn(effective, from, to)
 
-  const bars = new Path2D()
-  const quarters = new Path2D()
-  const sub = new Path2D()
+  const barPositions = barLinesIn(meterMap, from, to)
+  const groupPositions = groupLinesIn(meterMap, from, to)
+  const barKeys = new Set(barPositions.map(posKey))
+  const groupKeys = new Set(groupPositions.map(posKey))
 
-  for (const p of starts) {
+  const bars = new Path2D()
+  const groups = new Path2D()
+  const intersections = new Path2D()
+
+  const addLine = (path: Path2D, p: Pos): void => {
     const x = crisp(quartersToX(vp, toQuarters(p)), dpr)
-    const target = fracIsZero(p.frac) ? (p.col % 4 === 0 ? bars : quarters) : sub
-    target.moveTo(x, 0)
-    target.lineTo(x, size.height)
+    path.moveTo(x, 0)
+    path.lineTo(x, size.height)
+  }
+
+  for (const p of barPositions) addLine(bars, p)
+  for (const p of groupPositions) addLine(groups, p)
+  for (const p of starts) {
+    const k = posKey(p)
+    if (barKeys.has(k) || groupKeys.has(k)) continue
+    addLine(intersections, p)
   }
 
   ctx.lineWidth = 1
+  ctx.strokeStyle = theme.gridLineSub
+  ctx.stroke(intersections)
   ctx.strokeStyle = theme.gridLine
-  ctx.stroke(quarters)
+  ctx.stroke(groups)
   ctx.strokeStyle = theme.gridLineBar
   ctx.stroke(bars)
-  ctx.strokeStyle = theme.gridLineSub
-  ctx.stroke(sub)
 }

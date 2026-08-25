@@ -2,7 +2,8 @@ import type { Frac, Layer, LayerId, Note, Pos, Project, Subdiv, TempoEvent } fro
 import { isPositive, normalize } from '../core/frac'
 import { canonicalize, cmp as pcmp, lt as plt, pos as mkPos } from '../core/pos'
 import { validateSubdiv } from '../core/subdiv'
-import { DEFAULT_METER } from '../core/meter'
+import { DEFAULT_METER, buildMeterMap, validateMeter } from '../core/meter'
+import type { Meter } from '../core/meter'
 import type { GridRegion } from '../core/grid'
 import { validateGridValue } from '../core/gridValue'
 import { subdivsToRegions } from './gridMigrate'
@@ -98,6 +99,29 @@ function writeGrid(regions: readonly GridRegion[], where: string): unknown[] {
   return regions.map(writeGridRegion)
 }
 
+function writeMeter(m: Meter): unknown {
+  return { pos: writePos(m.pos), beatUnit: writeFrac(m.beatUnit), groups: [...m.groups] }
+}
+
+/**
+ * `meterMap` is already canonical by the time it reaches here (§3.7, `buildMeterMap`'s
+ * invariant): sorted by `pos`, anchored at or before the origin. Writing therefore only
+ * *asserts* that order and validates each meter's legality on the way out, mirroring
+ * `writeGrid`'s precedent immediately above — silently re-sorting would hide a caller
+ * bug, and skipping the legality check would let an unopenable file reach disk, since
+ * autosave never reads the bytes back before writing them (§10).
+ */
+function writeMeterMap(map: readonly Meter[], where: string): unknown[] {
+  for (let i = 0; i < map.length; i++) {
+    const m = map[i]!
+    validateMeter(m, `${where}[${i}]`)
+    if (i > 0 && pcmp(map[i - 1]!.pos, m.pos) >= 0) {
+      throw new Error(`Project: ${where} is not sorted into canonical order — this is a bug`)
+    }
+  }
+  return map.map(writeMeter)
+}
+
 /** A `Map` as column-sorted `[[col, value], ...]` — the §10 entry-array form. */
 function writeMap<V>(m: ReadonlyMap<number, V>, writeValue: (v: V) => unknown): unknown[] {
   return [...m.entries()]
@@ -141,6 +165,7 @@ export function serializeProject(p: Project): unknown {
     version: p.version,
     name: p.name,
     tempoMap: p.tempoMap.map((e) => ({ pos: writePos(e.pos), bpm: e.bpm })),
+    meterMap: writeMeterMap(p.meterMap, 'meterMap'),
     layers: p.layers.map(writeLayer),
     notes: p.notes.map(writeNote),
     activeLayerId: p.activeLayerId,
@@ -312,6 +337,24 @@ function readGrid(v: unknown, where: string): GridRegion[] {
   return out
 }
 
+/**
+ * `[{pos, beatUnit, groups}, ...]` back into a `Meter[]`, routed through
+ * `buildMeterMap` (§3.7). `validateMeter` checks each entry's own shape (a canonical
+ * `pos`, a positive power-of-two-denominator `beatUnit`, non-empty positive
+ * `groups`) but says nothing about the list as a whole; `buildMeterMap` is what
+ * establishes the anchoring invariant every bar-arithmetic function in `meter.ts`
+ * requires — `map[0].pos` at or before the origin — by prepending `DEFAULT_METER`
+ * when the first entry starts late. Skipping this step and handing the raw parsed
+ * array straight to `barLinesIn` / `groupLinesIn` / `barNumberAt` would make a v2 file
+ * whose `meterMap` begins after col 0 throw a `RangeError` from a draw path instead of
+ * failing (or loading) cleanly right here at the import boundary.
+ */
+function readMeterMap(v: unknown, where: string): readonly Meter[] {
+  const raw = requireArray(v, where)
+  const events = raw.map((e, i) => validateMeter(e, `${where}[${i}]`))
+  return guard(where, 'is not a valid meter map', () => buildMeterMap(events))
+}
+
 /** Fields shared by every `.go.json` version. */
 function readLayerCommon(o: Record<string, unknown>, where: string) {
   return {
@@ -415,10 +458,9 @@ export function deserializeProject(raw: unknown): Project {
   // the built map is discarded because §4.1 says runtime structures are not persisted.
   guard('tempoMap', 'is not a valid tempo map', () => buildTempoMap(tempoMap))
 
-  // `meterMap` is not yet part of the `.go.json` format — reading and writing it is
-  // Task 12's work. Every project gets the implicit one-4/4-at-the-origin default
-  // (design §3.7) until then, so `Project` stays fully constructed here.
-  const meterMap = [DEFAULT_METER]
+  // No `meterMap` key means one 4/4 at the origin (§3.7) — the same default
+  // `DEFAULT_METER` and `buildMeterMap` give an empty list.
+  const meterMap = o.meterMap === undefined ? [DEFAULT_METER] : readMeterMap(o.meterMap, 'meterMap')
 
   if (o.loop === undefined) {
     return { version: VERSION, name, tempoMap, layers, notes, activeLayerId, meterMap }

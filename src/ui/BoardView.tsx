@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef } from 'react'
 import type { Layer, LayerId, Note, NoteId } from '../core/types'
 import { toNumber } from '../core/frac'
+import { buildMeterMap } from '../core/meter'
 import { toQuarters } from '../core/pos'
 import { StoneAtlas } from '../board/atlas'
 import { FrameLoop, makeSurface, sizeSurface } from '../board/canvasHost'
@@ -145,6 +146,9 @@ export function BoardView(props: BoardViewProps): React.ReactElement {
       const vp = board.getViewport()
       const project = board.getProject()
       const active = board.activeLayer()
+      // Normalised once per frame: `buildMeterMap` establishes the anchoring
+      // invariant `barLinesIn` / `groupLinesIn` / `barNumberAt` require (§3.7).
+      const meterMap = buildMeterMap(project.meterMap)
 
       /*
        * §5.3: radius buckets shift with zoom, so the atlas is rebuilt "on zoom-end" —
@@ -178,7 +182,7 @@ export function BoardView(props: BoardViewProps): React.ReactElement {
           main.ctx.clip()
         }
         drawRows(main.ctx, v, main.size)
-        drawGridlines(main.ctx, v, main.size, board.gridFor(active.id), dpr)
+        drawGridlines(main.ctx, v, main.size, board.gridFor(active.id), meterMap, dpr)
         drawStones(
           main.ctx, v, main.size, atlas,
           {
@@ -243,7 +247,7 @@ export function BoardView(props: BoardViewProps): React.ReactElement {
       )
 
       const playhead = propsRef.current.playheadRef.current
-      drawRuler(ruler.ctx, boardVp, ruler.size, {
+      drawRuler(ruler.ctx, boardVp, ruler.size, meterMap, {
         loop: project.loop,
         playheadQuarters: playhead ?? undefined,
       })

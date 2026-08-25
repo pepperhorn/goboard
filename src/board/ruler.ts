@@ -1,5 +1,7 @@
 import type { Pos } from '../core/types'
-import { toQuarters } from '../core/pos'
+import type { Meter } from '../core/meter'
+import { barNumberAt } from '../core/meter'
+import { pos, toQuarters } from '../core/pos'
 import { theme } from './theme'
 import { quartersToX, visibleCols, xToQuarters } from './viewport'
 import type { Size, Viewport } from './viewport'
@@ -31,6 +33,7 @@ export function drawRuler(
   ctx: CanvasRenderingContext2D,
   vp: Viewport,
   size: Size,
+  meterMap: readonly Meter[],
   state: RulerState,
 ): void {
   const h = size.height
@@ -64,7 +67,8 @@ export function drawRuler(
     const x = Math.round(quartersToX(vp, col)) + 0.5
     ticks.moveTo(x, h - 7)
     ticks.lineTo(x, h)
-    ctx.fillText(`${col}`, x + 3, h - 10)
+    const { bar } = barNumberAt(meterMap, pos(col))
+    ctx.fillText(`${bar}`, x + 3, h - 10)
   }
   ctx.strokeStyle = theme.gutterEdge
   ctx.lineWidth = 1

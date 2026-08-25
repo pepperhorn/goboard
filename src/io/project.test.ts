@@ -750,3 +750,57 @@ describe('BoardStore.setGridRange', () => {
     expect(store.gridFor(id)).toEqual([])
   })
 })
+
+describe('meterMap persistence', () => {
+  it('round-trips a compound meter', () => {
+    const p = { ...createEmptyProject(), meterMap: [{ pos: pos(0), beatUnit: frac(1, 2), groups: [2, 2, 3] }] }
+    expect(projectFromString(projectToBlobString(p)).meterMap).toEqual(p.meterMap)
+  })
+
+  it('defaults to one 4/4 at the origin when absent', () => {
+    const old = JSON.parse(projectToBlobString(createEmptyProject())) as Record<string, unknown>
+    delete old.meterMap
+    expect(projectFromString(JSON.stringify(old)).meterMap).toEqual([
+      { pos: pos(0), beatUnit: frac(1), groups: [1, 1, 1, 1] },
+    ])
+  })
+
+  it('serializes identically for equal projects, so autosave does not churn', () => {
+    const a = { ...createEmptyProject(), meterMap: [{ pos: pos(0), beatUnit: frac(1, 4), groups: [2, 2] }] }
+    const b = { ...createEmptyProject(), meterMap: [{ pos: pos(0), beatUnit: frac(1, 4), groups: [2, 2] }] }
+    expect(projectToBlobString(a)).toBe(projectToBlobString(b))
+  })
+
+  it('rejects a meter whose beatUnit is not a power-of-two fraction of a quarter, naming the path', () => {
+    const bad = JSON.parse(projectToBlobString(createEmptyProject())) as Record<string, unknown>
+    bad.meterMap = [{ pos: { col: 0, frac: { n: 0, d: 1 } }, beatUnit: { n: 1, d: 3 }, groups: [4] }]
+    expect(() => projectFromString(JSON.stringify(bad))).toThrow(/meterMap\[0\]\.beatUnit/)
+  })
+
+  it('rejects an out-of-order meterMap', () => {
+    const bad = JSON.parse(projectToBlobString(createEmptyProject())) as Record<string, unknown>
+    bad.meterMap = [
+      { pos: { col: 4, frac: { n: 0, d: 1 } }, beatUnit: { n: 1, d: 1 }, groups: [4] },
+      { pos: { col: 2, frac: { n: 0, d: 1 } }, beatUnit: { n: 1, d: 1 }, groups: [4] },
+    ]
+    expect(() => projectFromString(JSON.stringify(bad))).toThrow(/meterMap/)
+  })
+
+  /**
+   * The Task 11 invariant this whole read path exists to protect: a v2 file whose
+   * first `meterMap` entry starts after col 0 must load cleanly — with an implicit
+   * `DEFAULT_METER` prepended by `buildMeterMap` — rather than sit anchored wrong and
+   * throw a `RangeError` later from a draw path (`barLinesIn` et al., via
+   * `assertAnchored`). Routing the reader's parsed array through `buildMeterMap` is
+   * what makes that true.
+   */
+  it('loads a v2 file whose first meter starts after the origin, prepending the implicit 4/4', () => {
+    const raw = JSON.parse(projectToBlobString(createEmptyProject())) as Record<string, unknown>
+    raw.meterMap = [{ pos: { col: 4, frac: { n: 0, d: 1 } }, beatUnit: { n: 1, d: 2 }, groups: [3, 3] }]
+    const loaded = projectFromString(JSON.stringify(raw))
+    expect(loaded.meterMap).toEqual([
+      DEFAULT_METER,
+      { pos: pos(4), beatUnit: frac(1, 2), groups: [3, 3] },
+    ])
+  })
+})
