@@ -1,14 +1,19 @@
-import type { Frac, LayerId, Note, NoteId, Subdiv } from '../core/types'
-import { frac, toNumber } from '../core/frac'
-import { enumerateSlots, slotIndexAt } from '../core/subdiv'
+import type { LayerId, Note, NoteId, Pos } from '../core/types'
+import { toNumber } from '../core/frac'
+import type { GridRegion, GridSlot } from '../core/grid'
+import type { GridCursor } from '../core/gridCursor'
+import { createGridCursor } from '../core/gridCursor'
+import { add as posAdd, cmp as posCmp, key as posKey, pos as makePos } from '../core/pos'
+import { quartersToPos } from '../core/tempo'
 import { effectiveVelocity } from '../audio/scheduler'
 import type { VelocityLayer } from '../audio/scheduler'
 import { theme } from './theme'
-import { quartersToWidth, quartersToX, visibleCols, xToQuarters } from './viewport'
+import { posToX, quartersToWidth, quartersToX, visibleCols, xToQuarters } from './viewport'
 import type { Size, Viewport } from './viewport'
 
 /**
- * The velocity lane. See go-spec.md §6.2, and §5.3 "Canvas coordination".
+ * The velocity lane. See go-spec.md §6.2, §5.3 "Canvas coordination", and the grid
+ * design doc §3.4 (slot velocity) and §3.6 (cursor-based grid resolution).
  *
  * Pure drawing plus the geometry the interaction layer hit-tests against — no React,
  * no DOM events, no rAF. The lane is its own canvas but NOT its own frame loop: the
@@ -20,12 +25,16 @@ import type { Size, Viewport } from './viewport'
  *    already owns. A second copy here would drift from what actually sounds.
  *  - **The `Viewport`** is the board's own object, passed in. Deriving a second one
  *    ("the lane only needs x") is exactly how the lane ends up a pixel off.
- *  - **Slot enumeration** comes from `enumerateSlots`/`slotIndexAt` (§3.2), so a bar
- *    and the stone above it agree on which slot they are, including inside a nested
- *    split where the flattened index is not `i` but a running sum.
+ *  - **Slot resolution** comes from `GridCursor`/`core/grid` (design §3.2), so a bar
+ *    and the stone above it agree on which slot they are — including a slot clipped
+ *    short by the next region's start.
  *
- * The unit of the lane is the **slot**, not the note and not the column: a column split
- * into 5 draws 5 bars whether it holds 0 notes or 12.
+ * The unit of the lane is the **slot**, not the note and not the column: since a grid
+ * value may be coarser than a quarter note (§3.2), a single slot can span two or four
+ * columns, and it still draws exactly ONE cell. That is why nothing here iterates
+ * columns to find slots — the draw walks slot starts and advances by each slot's own
+ * (possibly clipped) duration. Columns are iterated only to stroke the column rules,
+ * which are a property of the ruler, not of the grid.
  */
 
 /** Lane strip height in CSS px (§6.2). */
@@ -33,22 +42,19 @@ export const LANE_HEIGHT = 96
 
 export const MAX_VELOCITY = 127
 
-/** The active layer's subdivision for a column; `undefined` is the `{split:1}` default. */
-export type SubdivFor = (col: number) => Subdiv | undefined
-
 /** The layer facts the lane reads. A full §4 `Layer` satisfies it. */
 export type LaneLayer = VelocityLayer & {
   readonly id: LayerId
   readonly color: string
 }
 
-/** A slot addressed in lane space: which column, which flattened slot, and its rational span. */
-export type LaneSlot = {
-  readonly col: number
-  readonly slotIndex: number
-  readonly start: Frac
-  readonly dur: Frac
-}
+/**
+ * A slot addressed in lane space: an absolute start and its (possibly clipped) span.
+ *
+ * Identical to `GridSlot` — the lane deliberately has no slot type of its own any more.
+ * The old `{col, slotIndex}` pair could not name a slot that spans several columns.
+ */
+export type LaneSlot = GridSlot
 
 /**
  * One drawn division of a bar. A slot whose notes all resolve to the same velocity is
@@ -65,7 +71,7 @@ export type LaneSegment = {
  *
  * A drag must show its result while it is happening, but §7.3 allows exactly one
  * command per gesture — so the gesture accumulates here and the store is written once,
- * on pointerup. `slots` is keyed by `slotKey(col, slotIndex)`, `notes` by `NoteId`
+ * on pointerup. `slots` is keyed by `slotKey(slot.start)`, `notes` by `NoteId`
  * (the Alt-drag chord-internal override, which outranks the slot value just as
  * `note.vel` outranks `colVel` in §6.1).
  */
@@ -77,7 +83,8 @@ export type LanePreview = {
 export type LaneScene = {
   /** The active layer — the lane shows that layer alone, in its color (§6.2). */
   readonly layer: LaneLayer
-  readonly subdivFor: SubdivFor
+  /** The active layer's grid regions (§3.2); empty means one slot per quarter. */
+  readonly grid: readonly GridRegion[]
   /** Notes on the active layer, pos-sorted; `NoteIndex.queryRange` satisfies it. */
   readonly notesInRange: (startCol: number, endCol: number) => readonly Note[]
   /** §11 open question 3: ghosts ship behind a toggle. */
@@ -85,83 +92,43 @@ export type LaneScene = {
   readonly preview?: LanePreview | undefined
 }
 
-/** Key for a slot inside a `LanePreview`. */
-export const slotKey = (col: number, slotIndex: number): string => `${col}:${slotIndex}`
+/**
+ * Key for a slot inside a `LanePreview` — its absolute start.
+ *
+ * A slot start is globally unique across the grid, so no column/index disambiguation is
+ * needed and, crucially, a slot that covers four columns has exactly one key.
+ */
+export const slotKey = (start: Pos): string => posKey(start)
 
 const clamp = (v: number, lo: number, hi: number): number => (v < lo ? lo : v > hi ? hi : v)
 
 // --- geometry -------------------------------------------------------------------
 
 /**
- * Boundary tolerance, in slot units — the same trap `hitTest.pointToSlot` documents:
- * spans are half-open, but the pointer arrives as a float and `32/96 * 3` is
- * `0.9999999999999999`, so a bare `Math.floor` puts a click on a triplet boundary in
- * the previous slot.
- */
-const BOUNDARY_EPS = 1e-9
-
-/** Index of the slot containing `u` slot-units, snapped up at a boundary and clamped. */
-function slotIndexIn(u: number, count: number): number {
-  let i = Math.floor(u)
-  if (u - i >= 1 - BOUNDARY_EPS) i += 1
-  return i < 0 ? 0 : i >= count ? count - 1 : i
-}
-
-/**
  * The slot under a lane x coordinate — the interaction layer's hit test.
  *
- * Returns the *flattened* slot index, matching `enumerateSlots` order, so a caller can
- * address the bar it just drew. The rational `start`/`dur` are built from integer slot
- * indices, never from the float x (§3.1).
+ * The float pixel is turned into an approximate `Pos` by `quartersToPos` purely so the
+ * cursor can be asked which slot governs it; the returned `start`/`dur` come back out
+ * of exact region arithmetic and the approximation is never stored (§3.1). This is the
+ * same contract `hitTest.pointToSlot` documents, minus the nearest-intersection step:
+ * a lane cell is *containing*, not nearest, because the bar fills the cell.
+ *
+ * `quartersToPos`' bounded continued-fraction recovery is also what replaces the old
+ * `BOUNDARY_EPS`: `32/96` comes back as exactly `1/3`, so a click on a triplet boundary
+ * lands in the slot that boundary *starts*, per the half-open rule.
  *
  * `null` only for a non-finite x: the lane is boundless horizontally, exactly like the
- * board, so every real pixel belongs to some column.
+ * board, so every real pixel belongs to some slot.
  */
-export function laneSlotAt(vp: Viewport, subdivFor: SubdivFor, x: number): LaneSlot | null {
+export function laneSlotAt(vp: Viewport, cursor: GridCursor, x: number): LaneSlot | null {
   if (!Number.isFinite(x)) return null
-
-  const q = xToQuarters(vp, x)
-  let col = Math.floor(q)
-  let off = q - col
-  // A column boundary starts the next column, on the same half-open rule.
-  if (off >= 1 - BOUNDARY_EPS) {
-    col += 1
-    off = 0
-  }
-
-  const sd = subdivFor(col)
-  const split = sd?.split ?? 1
-  const i = slotIndexIn(off * split, split)
-  const children = sd?.children
-
-  // Slots before slot i: one per leaf, `child.split` per subdivided slot.
-  let index = i
-  if (children !== undefined) {
-    index = 0
-    for (let k = 0; k < i; k++) index += children[k]?.split ?? 1
-  }
-
-  const child = children?.[i] ?? null
-  if (child === null) {
-    return { col, slotIndex: index, start: frac(i, split), dur: frac(1, split) }
-  }
-  const t = child.split
-  const j = slotIndexIn((off * split - i) * t, t)
-  return {
-    col,
-    slotIndex: index + j,
-    start: frac(i * t + j, split * t),
-    dur: frac(1, split * t),
-  }
+  return cursor.slotAt(quartersToPos(xToQuarters(vp, x)))
 }
 
 /** Left edge and width of a slot's bar cell, in lane px. */
-export function slotCellX(vp: Viewport, col: number, slot: { start: Frac; dur: Frac }): {
-  x: number
-  width: number
-} {
+export function slotCellX(vp: Viewport, slot: LaneSlot): { x: number; width: number } {
   return {
-    x: quartersToX(vp, col + toNumber(slot.start)),
+    x: posToX(vp, slot.start),
     width: quartersToWidth(vp, toNumber(slot.dur)),
   }
 }
@@ -200,14 +167,14 @@ export function segmentIndexAt(count: number, cellX: number, cellWidth: number, 
   return clamp(Math.floor(((x - cellX) / cellWidth) * count), 0, count - 1)
 }
 
-// --- velocity resolution (§6.1, preview-aware) ------------------------------------
+// --- velocity resolution (§6.1, §3.4, preview-aware) ------------------------------
 
 /** Velocity lookups for one lane frame, with the in-flight drag folded in. */
 export type LaneVelocities = {
   /** Effective velocity of a note (§6.1), overridden by the drag in progress. */
-  readonly velOf: (note: Note, col: number, slotIndex: number) => number
-  /** The would-be velocity of an *empty* slot: the column override, else the layer default. */
-  readonly ghostOf: (col: number, slotIndex: number) => number
+  readonly velOf: (note: Note, slotStart: Pos) => number
+  /** The would-be velocity of an *empty* slot: the column override, else the default. */
+  readonly ghostOf: (slotStart: Pos) => number
 }
 
 /**
@@ -215,15 +182,21 @@ export type LaneVelocities = {
  *
  * The preview precedence mirrors §6.1 one level up: a per-note Alt-drag beats a
  * slot drag, which beats whatever the store currently holds.
+ *
+ * Per design §3.4, storage stays **column-keyed** while display is slot-scoped: the
+ * value a slot shows is the one stored at its *starting* column, whatever else may sit
+ * in the columns it goes on to cover. Note-level resolution is untouched — a note still
+ * resolves through `note.vel → colVel.get(note.pos.col) → defaultVel`, on-grid or off,
+ * because `effectiveVelocity` is the scheduler's function and the lane only draws it.
  */
 export function laneVelocities(layer: LaneLayer, preview?: LanePreview | undefined): LaneVelocities {
   const slots = preview?.slots
   const notes = preview?.notes
   return {
-    velOf: (note, col, slotIndex) =>
-      notes?.get(note.id) ?? slots?.get(slotKey(col, slotIndex)) ?? effectiveVelocity(note, layer),
-    ghostOf: (col, slotIndex) =>
-      slots?.get(slotKey(col, slotIndex)) ?? layer.colVel.get(col) ?? layer.defaultVel,
+    velOf: (note, slotStart) =>
+      notes?.get(note.id) ?? slots?.get(slotKey(slotStart)) ?? effectiveVelocity(note, layer),
+    ghostOf: (slotStart) =>
+      slots?.get(slotKey(slotStart)) ?? layer.colVel.get(slotStart.col) ?? layer.defaultVel,
   }
 }
 
@@ -272,20 +245,31 @@ export function noteSegments(
 }
 
 /**
- * Bucket a column's notes by flattened slot index.
+ * Bucket notes by the slot that contains them, keyed by `slotKey(slot.start)`.
  *
- * Off-grid notes (§7: changing a subdivision re-quantizes nothing) land in the slot
- * that *contains* them rather than vanishing from the lane — `slotIndexAt` resolves
+ * Keying by slot start rather than by `(column, index)` is what lets a slot spanning
+ * several columns own a single bucket: two notes a whole column apart under a half-note
+ * grid land in the same bucket, and the lane draws them as one split bar.
+ *
+ * Off-grid notes (§7: changing the grid re-quantizes nothing) land in the slot that
+ * *contains* them rather than vanishing from the lane — `cursor.slotAt` resolves
  * containment, not equality.
+ *
+ * Resolution goes through a `GridCursor`, not a binary search per note (§3.6): `notes`
+ * arrives pos-sorted from `NoteIndex`, so the cursor's forward walk is O(n + regions).
+ * An unsorted caller still gets correct answers — a backward step just pays for a seek.
  */
-export function bucketBySlot(sd: Subdiv | undefined, notes: readonly Note[]): Map<number, Note[]> {
-  const out = new Map<number, Note[]>()
+export function bucketBySlot(
+  regions: readonly GridRegion[],
+  notes: readonly Note[],
+): Map<string, Note[]> {
+  const out = new Map<string, Note[]>()
+  const cursor = createGridCursor(regions)
   for (const note of notes) {
-    const index = slotIndexAt(sd, note.pos.frac)
-    if (index < 0) continue
-    const bucket = out.get(index)
+    const key = slotKey(cursor.slotAt(note.pos).start)
+    const bucket = out.get(key)
     if (bucket) bucket.push(note)
-    else out.set(index, [note])
+    else out.set(key, [note])
   }
   return out
 }
@@ -308,6 +292,19 @@ const crisp = (v: number, dpr: number): number => px(v, dpr) + 0.5 / dpr
  *
  * Batched by visual class per §5.3: the column rules, every ghost, every solid segment
  * and every bar cap are four paths and four style assignments, not four per bar.
+ *
+ * **Structure.** Two independent walks, which is the whole point of this pass:
+ *  1. Column rules — `for (col = start; col <= end; col++)`. A rule is a property of
+ *     the ruler, so it is drawn per column no matter what the grid does.
+ *  2. Cells — a forward walk over slot *starts*, each step advancing by that slot's own
+ *     `dur`. Since the walk never subdivides a column and never visits a position
+ *     twice, a slot covering four columns is visited exactly once and therefore draws
+ *     exactly one cell; a slot clipped short by the next region's start draws one
+ *     narrow cell, and is a real, editable slot like any other.
+ *
+ * The walk starts at `cursor.slotAt(from).start`, which may lie left of the visible
+ * span: a whole-note slot beginning three columns off-screen still has most of its cell
+ * on screen, and skipping it (as a gridline pass legitimately does) would leave a hole.
  */
 export function drawLane(
   ctx: CanvasRenderingContext2D,
@@ -320,19 +317,23 @@ export function drawLane(
   ctx.fillStyle = theme.laneBg
   ctx.fillRect(0, 0, size.width, h)
 
-  // Onsets only: a note's bar sits in the slot it starts in, so unlike the board this
-  // pass needs no `maxDurQuarters` widening — a long note contributes one bar, at its
-  // head, and cannot reach in from the left.
   const { start, end } = visibleCols(vp, size)
   const { velOf, ghostOf } = laneVelocities(scene.layer, scene.preview)
 
-  const byCol = new Map<number, Note[]>()
-  for (const note of scene.notesInRange(start, end)) {
-    if (note.pos.col < start || note.pos.col >= end) continue
-    const bucket = byCol.get(note.pos.col)
-    if (bucket) bucket.push(note)
-    else byCol.set(note.pos.col, [note])
-  }
+  const cursor = createGridCursor(scene.grid)
+  const from = makePos(start)
+  const to = makePos(end)
+  // The leftmost cell may begin before the viewport; its notes begin there too.
+  const first = cursor.slotAt(from).start
+  cursor.reset()
+
+  // Onsets only: a note's bar sits in the slot it starts in, so unlike the board this
+  // pass needs no `maxDurQuarters` widening — a long note contributes one bar, at its
+  // head, and cannot reach in from the left.
+  const byslot = bucketBySlot(
+    scene.grid,
+    scene.notesInRange(Math.min(first.col, start), end + 1),
+  )
 
   const rules = new Path2D()
   const bars = new Path2D()
@@ -343,46 +344,47 @@ export function drawLane(
   let anyBar = false
 
   for (let col = start; col <= end; col++) {
-    const colX = quartersToX(vp, col)
-    rules.moveTo(crisp(colX, dpr), 0)
-    rules.lineTo(crisp(colX, dpr), h)
+    const colX = crisp(quartersToX(vp, col), dpr)
+    rules.moveTo(colX, 0)
+    rules.lineTo(colX, h)
+  }
 
-    const sd = scene.subdivFor(col)
-    const slots = enumerateSlots(sd)
-    const byslot = bucketBySlot(sd, byCol.get(col) ?? [])
+  for (let at = first; posCmp(at, to) <= 0; ) {
+    const slot = cursor.slotAt(at)
+    // A region boundary can only shorten a slot, never zero it (`slotAt` picks the
+    // later region at a coincident start) — but never trust an unbounded walk.
+    if (slot.dur.n <= 0) break
 
-    for (let i = 0; i < slots.length; i++) {
-      const slot = slots[i]!
-      const cellX = colX + quartersToWidth(vp, toNumber(slot.start))
-      const cellW = quartersToWidth(vp, toNumber(slot.dur))
-      if (cellX > size.width || cellX + cellW < 0) continue
+    const cellX = posToX(vp, slot.start)
+    const cellW = quartersToWidth(vp, toNumber(slot.dur))
+    at = posAdd(slot.start, slot.dur)
+    if (cellX > size.width || cellX + cellW < 0) continue
 
-      const { x: barX, width: barW } = slotBarX(cellX, cellW)
+    const { x: barX, width: barW } = slotBarX(cellX, cellW)
+    const notes = byslot.get(slotKey(slot.start))
 
-      const notes = byslot.get(i)
-      if (notes === undefined || notes.length === 0) {
-        if (!scene.showGhosts || cellW < MIN_GHOST_WIDTH) continue
-        const y = px(velocityToY(h, ghostOf(col, i)), dpr)
-        ghosts.rect(px(barX, dpr), y, px(barW, dpr), h - y)
-        anyGhost = true
-        drawn++
-        continue
-      }
+    if (notes === undefined || notes.length === 0) {
+      if (!scene.showGhosts || cellW < MIN_GHOST_WIDTH) continue
+      const y = px(velocityToY(h, ghostOf(slot.start)), dpr)
+      ghosts.rect(px(barX, dpr), y, px(barW, dpr), h - y)
+      anyGhost = true
+      drawn++
+      continue
+    }
 
-      const segments = slotSegments(notes, (n) => velOf(n, col, i))
-      const n = segments.length
-      const segW = Math.max(1, (barW - (n - 1) * SEGMENT_GAP) / n)
-      for (let s = 0; s < n; s++) {
-        const x = px(barX + s * (segW + SEGMENT_GAP), dpr)
-        const y = px(velocityToY(h, segments[s]!.vel), dpr)
-        const w = px(segW, dpr)
-        bars.rect(x, y, w, h - y)
-        // A cap keeps a near-zero bar visible and reads as the drag handle it is.
-        caps.moveTo(x, crisp(y, dpr))
-        caps.lineTo(x + w, crisp(y, dpr))
-        anyBar = true
-        drawn++
-      }
+    const segments = slotSegments(notes, (n) => velOf(n, slot.start))
+    const n = segments.length
+    const segW = Math.max(1, (barW - (n - 1) * SEGMENT_GAP) / n)
+    for (let s = 0; s < n; s++) {
+      const x = px(barX + s * (segW + SEGMENT_GAP), dpr)
+      const y = px(velocityToY(h, segments[s]!.vel), dpr)
+      const w = px(segW, dpr)
+      bars.rect(x, y, w, h - y)
+      // A cap keeps a near-zero bar visible and reads as the drag handle it is.
+      caps.moveTo(x, crisp(y, dpr))
+      caps.lineTo(x + w, crisp(y, dpr))
+      anyBar = true
+      drawn++
     }
   }
 
@@ -411,4 +413,31 @@ export function drawLane(
   ctx.stroke()
 
   return drawn
+}
+
+/**
+ * The half-open column range a slot covers — `[start.col, endCol)`.
+ *
+ * Design §3.4: a lane edit on a slot writes its velocity to **every** column the slot
+ * covers, so the value is there whichever column a later note is placed in.
+ *
+ * The end column is computed in integers, deliberately. `ceil(toQuarters(...))` looks
+ * equivalent and is not: `toQuarters` is a float, and a value like `1/3` lands on the
+ * wrong side of a boundary often enough to matter (§3.1 — no float decides a column).
+ */
+export function slotColumns(slot: LaneSlot): { fromCol: number; toCol: number } {
+  const end = posAdd(slot.start, slot.dur)
+  return { fromCol: slot.start.col, toCol: end.frac.n === 0 ? end.col : end.col + 1 }
+}
+
+/**
+ * Does this slot cover whole columns and nothing less?
+ *
+ * §6.2's rule was "an undivided column edits the column value"; with a grid that can be
+ * coarser than a column, the same rule reads "a slot no finer than a column edits the
+ * column values it covers". A sub-column slot with notes in it edits those notes
+ * instead, exactly as before.
+ */
+export function slotIsColumnAligned(slot: LaneSlot): boolean {
+  return slot.start.frac.n === 0 && slot.dur.d === 1 && slot.dur.n > 0
 }

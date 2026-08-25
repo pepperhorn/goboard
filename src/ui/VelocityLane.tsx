@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef } from 'react'
-import type { Note, NoteId } from '../core/types'
-import { slotCount } from '../core/subdiv'
+import type { LayerId, Note, NoteId } from '../core/types'
+import { createGridCursor } from '../core/gridCursor'
+import type { GridCursor } from '../core/gridCursor'
 import { makeSurface, sizeSurface } from '../board/canvasHost'
 import type { Surface } from '../board/canvasHost'
 import {
@@ -13,6 +14,8 @@ import {
   segmentIndexAt,
   slotBarX,
   slotCellX,
+  slotColumns,
+  slotIsColumnAligned,
   slotKey,
   velocityAtY,
 } from '../board/lane'
@@ -74,8 +77,8 @@ type DragState = {
   pointerId: number
   /** Alt-drag targets one note for the whole gesture — §6.2's chord-internal override. */
   altNoteId: NoteId | null
-  /** `slotKey(col, slotIndex)` -> the slot and the velocity the drag last set on it. */
-  slots: Map<string, { col: number; slotIndex: number; vel: number }>
+  /** `slotKey(slot.start)` -> the slot and the velocity the drag last set on it. */
+  slots: Map<string, { slot: LaneSlot; vel: number }>
   notes: Map<NoteId, number>
   cancelled: boolean
 }
@@ -97,10 +100,25 @@ export function VelocityLane({
   const ghostsRef = useRef(showGhosts ?? ghostToggle)
   ghostsRef.current = showGhosts ?? ghostToggle
 
-  /** Notes of the active layer whose onset is in `col`. */
-  const notesInCol = useCallback(
-    (layerId: string, col: number): Note[] =>
-      board.getIndex().queryRange(layerId, col, col + 1).filter((n) => n.pos.col === col),
+  /**
+   * Notes whose onset falls inside `slot` — the bar's contents.
+   *
+   * The query spans every column the slot covers, not one: under a grid coarser than a
+   * quarter a single slot reaches across two or four columns (design §3.2), and
+   * `bucketBySlot` then resolves containment for off-grid notes.
+   */
+  const slotNotes = useCallback(
+    (layerId: LayerId, slot: LaneSlot): Note[] => {
+      const { fromCol, toCol } = slotColumns(slot)
+      const notes = board.getIndex().queryRange(layerId, fromCol, toCol)
+      return bucketBySlot(board.gridFor(layerId), notes).get(slotKey(slot.start)) ?? []
+    },
+    [board],
+  )
+
+  /** A fresh grid cursor for the active layer — one per gesture sample (§3.6). */
+  const cursorFor = useCallback(
+    (layerId: LayerId): GridCursor => createGridCursor(board.gridFor(layerId)),
     [board],
   )
 
@@ -109,7 +127,7 @@ export function VelocityLane({
     const drag = dragRef.current
     return {
       layer,
-      subdivFor: (col) => board.subdivFor(layer.id, col),
+      grid: board.gridFor(layer.id),
       notesInRange: (start, end) => board.getIndex().queryRange(layer.id, start, end),
       showGhosts: ghostsRef.current,
       preview: drag
@@ -129,16 +147,11 @@ export function VelocityLane({
     return { x: e.clientX - rect.left, y: e.clientY - rect.top, h: rect.height }
   }
 
-  const slotNotes = (layerId: string, hit: LaneSlot): Note[] =>
-    bucketBySlot(board.subdivFor(layerId, hit.col), notesInCol(layerId, hit.col)).get(
-      hit.slotIndex,
-    ) ?? []
-
   /** Record one sample of the drag. Nothing is committed here — see the header. */
   const sample = (e: React.PointerEvent<HTMLCanvasElement>, drag: DragState): void => {
     const { x, y, h } = local(e)
     const layer = board.activeLayer()
-    const hit = laneSlotAt(board.getViewport(), (col) => board.subdivFor(layer.id, col), x)
+    const hit = laneSlotAt(board.getViewport(), cursorFor(layer.id), x)
     if (!hit) return
     const vel = velocityAtY(h, y)
 
@@ -147,11 +160,7 @@ export function VelocityLane({
       // neighbouring note halfway through the gesture.
       drag.notes.set(drag.altNoteId, vel)
     } else {
-      drag.slots.set(slotKey(hit.col, hit.slotIndex), {
-        col: hit.col,
-        slotIndex: hit.slotIndex,
-        vel,
-      })
+      drag.slots.set(slotKey(hit.start), { slot: hit, vel })
     }
     // Mark the board dirty so the shared rAF owner repaints; React is not involved.
     board.touch()
@@ -163,8 +172,8 @@ export function VelocityLane({
     const notes = slotNotes(layer.id, hit)
     if (notes.length === 0) return null
     const { velOf } = laneVelocities(layer)
-    const segments = noteSegments(notes, (n) => velOf(n, hit.col, hit.slotIndex))
-    const cell = slotCellX(board.getViewport(), hit.col, hit)
+    const segments = noteSegments(notes, (n) => velOf(n, hit.start))
+    const cell = slotCellX(board.getViewport(), hit)
     const bar = slotBarX(cell.x, cell.width)
     const { x } = local(e)
     return segments[segmentIndexAt(segments.length, bar.x, bar.width, x)]?.noteIds[0] ?? null
@@ -174,7 +183,7 @@ export function VelocityLane({
     if (e.button !== 0 || dragRef.current) return
     const layer = board.activeLayer()
     const { x } = local(e)
-    const hit = laneSlotAt(board.getViewport(), (col) => board.subdivFor(layer.id, col), x)
+    const hit = laneSlotAt(board.getViewport(), cursorFor(layer.id), x)
     if (!hit) return
 
     e.currentTarget.setPointerCapture(e.pointerId)
@@ -210,13 +219,17 @@ export function VelocityLane({
       for (const [id, vel] of drag.notes) board.updateNote(id, { vel }, 'Note velocity')
 
       for (const plan of drag.slots.values()) {
-        const sd = board.subdivFor(layer.id, plan.col)
-        const notes = bucketBySlot(sd, notesInCol(layer.id, plan.col)).get(plan.slotIndex) ?? []
-        // §6.2: an undivided column edits the column value. So does an empty slot —
-        // that is what makes a ghost bar draggable, and pre-shaping dynamics is the
-        // reason ghosts exist at all.
-        if (notes.length === 0 || slotCount(sd) === 1) {
-          board.setColVel(layer.id, plan.col, plan.vel)
+        const notes = slotNotes(layer.id, plan.slot)
+        // §6.2: a slot no finer than a column edits the column value. So does an empty
+        // slot — that is what makes a ghost bar draggable, and pre-shaping dynamics is
+        // the reason ghosts exist at all.
+        //
+        // Design §3.4: the write covers EVERY column the slot spans, not just its head,
+        // so a half- or whole-note slot does not leave stale values in the columns it
+        // covers for a note placed there later to inherit.
+        if (notes.length === 0 || slotIsColumnAligned(plan.slot)) {
+          const { fromCol, toCol } = slotColumns(plan.slot)
+          board.setColVelRange(layer.id, fromCol, toCol, plan.vel)
         } else {
           for (const note of notes) board.updateNote(note.id, { vel: plan.vel }, 'Slot velocity')
         }

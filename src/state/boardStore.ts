@@ -295,6 +295,37 @@ export class BoardStore {
     this.run({ label: 'Column velocity', do: () => swap(vel), undo: () => swap(prev) })
   }
 
+  /**
+   * Set every column in the half-open range `[fromCol, toCol)` to `vel` (design §3.4).
+   *
+   * Velocity storage stays column-keyed even though the lane is slot-scoped, so a lane
+   * edit on a slot spanning several columns has to write all of them — otherwise a note
+   * later placed in the slot's second column would inherit a stale value from before
+   * the edit. Passing `undefined` clears the range instead.
+   *
+   * One command for the whole range (§7.3): the previous map is captured whole, so undo
+   * restores columns the range overwrote as well as those it created.
+   */
+  setColVelRange(layerId: LayerId, fromCol: number, toCol: number, vel: number | undefined): void {
+    const l = this.layer(layerId)
+    if (!l || toCol <= fromCol) return
+    const prev = new Map(l.colVel)
+    const next = new Map(l.colVel)
+    for (let col = fromCol; col < toCol; col++) {
+      if (vel === undefined) next.delete(col)
+      else next.set(col, vel)
+    }
+    const swap = (colVel: ReadonlyMap<number, number>) => {
+      this.project = {
+        ...this.project,
+        layers: this.project.layers.map((x) =>
+          x.id === layerId ? { ...x, colVel: new Map(colVel) } : x),
+      }
+      this.touch()
+    }
+    this.run({ label: 'Column velocity', do: () => swap(next), undo: () => swap(prev) })
+  }
+
   // --- transport-adjacent project state ---
 
   setLoop(loop: { start: Pos; end: Pos } | undefined): void {
