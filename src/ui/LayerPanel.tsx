@@ -153,7 +153,7 @@ function addLayer(board: BoardStore): void {
     visible: true,
     defaultVel: INIT_VEL,
     colVel: new Map<number, number>(),
-    subdivs: new Map(),
+    grid: [],
     order: layers.length,
   }
   board.batch('Add layer', () => {
@@ -175,7 +175,7 @@ function duplicateLayer(board: BoardStore, id: LayerId): void {
     name: `${src.name} copy`,
     channel: nextChannel(layers),
     colVel: new Map(src.colVel),
-    subdivs: new Map(src.subdivs),
+    grid: [...src.grid],
     order: at + 1,
   }
   const next = [...layers.slice(0, at + 1), copy, ...layers.slice(at + 1)]

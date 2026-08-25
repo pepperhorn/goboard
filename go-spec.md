@@ -288,15 +288,15 @@ Column-level velocity is **time-linear per layer**: all notes in a column stack 
 | Ruler | Click | Seek playhead |
 | Ruler | Drag | Set loop region |
 | Ruler | Shift-click | Clear loop region |
-| Ruler | Right-click / long-press a column | Subdivision editor for that column (active layer): pick split 1–16; then optionally tap a slot and pick a nested split 2–16 |
+| Ruler | Right-click / long-press a column | Grid editor for that range (active layer): pick a line spacing from the eleven presets, or type a custom `n/d` tuplet. Default range is the clicked column to the next |
 | Any | Space | Play/stop from playhead |
 | Any | Wheel | Pan vertically |
 | Any | Shift+wheel | Pan horizontally |
 | Any | Middle-drag / two-finger drag | Pan |
 | Any | Ctrl+wheel / pinch | Zoom about the cursor |
 | Any | Ctrl+Z / Ctrl+Shift+Z | Undo/redo |
-| Any | `1`–`9`, `0` | Quick-set split 1–10 on the hovered column (or hovered slot, if the pointer is inside a subdivided column — that sets the nested split) |
-| Any | `Shift+1`–`Shift+6` | Quick-set split 11–16, same target rule |
+| Any | `1`–`9`, `0` | Quick-set the grid to `1/n` quarters (n = 1–10) over the hovered slot's column |
+| Any | `Shift+1`–`Shift+6` | Quick-set `1/11`–`1/16` quarters, same target rule |
 
 **Bindings deliberately not used.** `Space+drag` to pan is dropped — play fires on keydown, so arming the pan would start playback. `Alt-drag` is not a board binding: GNOME and KDE consume it for window moves, and §6.2 already uses Alt in the velocity lane.
 

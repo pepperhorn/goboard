@@ -73,7 +73,7 @@ export type BoardViewProps = {
   readonly onToggleTransport: () => void
   /** Absolute playhead position in quarters while playing, else null. */
   readonly playheadRef: { current: number | null }
-  readonly onSubdivMenu: (col: number, clientX: number, clientY: number) => void
+  readonly onGridMenu: (col: number, clientX: number, clientY: number) => void
   /**
    * The velocity lane's imperative draw hook. §5.3 allows exactly one rAF owner, so
    * the lane registers here instead of running its own loop.
@@ -178,14 +178,14 @@ export function BoardView(props: BoardViewProps): React.ReactElement {
           main.ctx.clip()
         }
         drawRows(main.ctx, v, main.size)
-        drawGridlines(main.ctx, v, main.size, (col) => active.subdivs.get(col), dpr)
+        drawGridlines(main.ctx, v, main.size, board.gridFor(active.id), dpr)
         drawStones(
           main.ctx, v, main.size, atlas,
           {
             index: board.getIndex(),
             layers: board.drawOrder(),
             activeLayerId: active.id,
-            subdivFor: (layerId, col) => board.subdivFor(layerId, col),
+            gridFor: (layerId) => board.gridFor(layerId),
             isKit: (layerId) => propsRef.current.isKit(layerId),
             maxDurQuarters: board.maxDur(),
           },
@@ -334,7 +334,7 @@ export function BoardView(props: BoardViewProps): React.ReactElement {
     boardCanvas.addEventListener('contextmenu', onContext)
 
     // Ruler: click seeks, drag sets the loop, shift-click clears, right-click
-    // opens the subdivision editor (§7.2).
+    // opens the grid editor (§7.2).
     let loopAnchor: number | null = null
     const onRulerDown = (e: PointerEvent) => {
       const { x } = local(rulerCanvas, e)
@@ -342,7 +342,7 @@ export function BoardView(props: BoardViewProps): React.ReactElement {
       const q = xToQuarters(vp, x)
       if (e.button === 2) {
         e.preventDefault()
-        propsRef.current.onSubdivMenu(Math.floor(q), e.clientX, e.clientY)
+        propsRef.current.onGridMenu(Math.floor(q), e.clientX, e.clientY)
         return
       }
       if (e.button !== 0) return
@@ -424,12 +424,12 @@ export function BoardView(props: BoardViewProps): React.ReactElement {
       return
     }
     if (/^[0-9]$/.test(e.key) && !e.ctrlKey && !e.metaKey) {
-      if (interaction.quickSplit(Number(e.key), false)) e.preventDefault()
+      if (interaction.quickGrid(Number(e.key), false)) e.preventDefault()
       return
     }
-    // Shift+1..6 reaches splits 11–16 (§7.2); the shifted key is a symbol.
+    // Shift+1..6 reaches 1/11–1/16 (§7.2); the shifted key is a symbol.
     const shifted = ['!', '@', '#', '$', '%', '^'].indexOf(e.key)
-    if (shifted >= 0 && interaction.quickSplit(shifted + 1, true)) e.preventDefault()
+    if (shifted >= 0 && interaction.quickGrid(shifted + 1, true)) e.preventDefault()
   }, [board])
 
   useEffect(() => {

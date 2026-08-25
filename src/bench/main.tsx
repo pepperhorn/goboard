@@ -51,7 +51,7 @@ function BenchShell(): React.ReactElement {
           onSeek={noop}
           onToggleTransport={noop}
           playheadRef={playheadRef}
-          onSubdivMenu={noop}
+          onGridMenu={noop}
           laneRef={laneRef}
         />
       </div>

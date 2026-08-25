@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 
 /**
- * The three smoke flows §12 allows. Each one covers something the headless suite
+ * The smoke flows §12 allows. Each one covers something the headless suite
  * structurally cannot: that the app boots at all, that a pointer gesture reaches the
  * canvas and commits a command, and that the browser-only halves of §10 — the
  * download and IndexedDB — actually fire.
@@ -109,4 +109,41 @@ test('autosave survives a reload (§10)', async ({ page }) => {
 
   await expect(page.locator('.file-menu__status')).toContainText('Restored your last session')
   await expect(activeCount(page)).toHaveText('1')
+})
+
+/*
+ * The grid menu is React, and §12's headless suite runs in `environment: 'node'` with
+ * an `src/**\/*.test.ts` include — so a component that only exists as `.tsx` in a DOM
+ * is structurally out of its reach, which is the same reason the flows above are here.
+ * One flow, covering the two things that would be silent breakages: the menu opening
+ * off the ruler at all, and a custom tuplet off the §3.1 lattice reporting rather than
+ * throwing into React.
+ */
+test('the grid menu applies a preset and reports an off-lattice tuplet (§7.2)', async ({ page }) => {
+  await page.goto('/')
+
+  const ruler = page.locator('.board-ruler')
+  const box = await ruler.boundingBox()
+  if (!box) throw new Error('ruler canvas has no box')
+  const openMenu = () =>
+    page.mouse.click(box.x + 300, box.y + box.height / 2, { button: 'right' })
+
+  await openMenu()
+  const menu = page.locator('.grid-menu')
+  await expect(menu).toBeVisible()
+  await expect(menu.locator('.grid-chip')).toHaveCount(11) // the eleven §3.1 presets
+
+  // 1/17 is in range but off the lattice: a message, not a crash, and the menu stays.
+  await menu.locator('.grid-menu__input').nth(1).fill('17')
+  await menu.locator('.grid-menu__apply').click()
+  await expect(menu.locator('.grid-menu__error')).toContainText('lattice')
+  await expect(menu).toBeVisible()
+
+  // A preset applies and closes; the edit is one undoable command (§7.3).
+  await menu.locator('.grid-chip', { hasText: /^16th$/ }).click()
+  await expect(page.locator('.grid-menu')).toHaveCount(0)
+  await expect(page.locator('.btn-undo')).toBeEnabled()
+
+  await openMenu()
+  await expect(page.locator('.grid-menu__label').first()).toContainText('16th')
 })

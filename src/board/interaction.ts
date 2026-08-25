@@ -1,6 +1,9 @@
 import type { Frac, LayerId, Note, NoteId, Pos } from '../core/types'
-import { add as fracAdd, isPositive, toNumber } from '../core/frac'
-import { add as posAdd, cmp as posCmp, diff as posDiff, key as posKey } from '../core/pos'
+import { add as fracAdd, cmp as fracCmp, frac, isPositive, toNumber } from '../core/frac'
+import { add as posAdd, cmp as posCmp, diff as posDiff, key as posKey, pos } from '../core/pos'
+import type { GridSlot } from '../core/grid'
+import type { GridCursor } from '../core/gridCursor'
+import { createGridCursor } from '../core/gridCursor'
 import type { BoardStore } from '../state/boardStore'
 import {
   DRAG_THRESHOLD_MOUSE, DRAG_THRESHOLD_TOUCH, createDragLatch, hitNote, pointToSlot, resizeZone,
@@ -61,14 +64,35 @@ export class BoardInteraction {
     return this.hoverSlot
   }
 
-  private subdivFor = (col: number) => {
+  /**
+   * One grid cursor per layer, rebuilt when a command commits (§3.6). Every draw and
+   * hit path resolves the grid through a cursor rather than a fresh binary search per
+   * query; a hit test asks about several notes on the same layer in a row, so the
+   * cursor's forward walk is exactly the access pattern it was written for.
+   */
+  private cursors = new Map<LayerId, GridCursor>()
+  private cursorVersion = -1
+
+  private cursorFor(layerId: LayerId): GridCursor {
     const board = this.deps.board
-    return board.subdivFor(board.activeLayer().id, col)
+    if (board.commitVersion !== this.cursorVersion) {
+      this.cursors.clear()
+      this.cursorVersion = board.commitVersion
+    }
+    const existing = this.cursors.get(layerId)
+    if (existing) return existing
+    const cursor = createGridCursor(board.gridFor(layerId))
+    this.cursors.set(layerId, cursor)
+    return cursor
+  }
+
+  private activeCursor(): GridCursor {
+    return this.cursorFor(this.deps.board.activeLayer().id)
   }
 
   private slotWidthOf = (note: Note): number => {
     const board = this.deps.board
-    return slotWidthFor(board.getViewport(), board.subdivFor(note.layerId, note.pos.col), note)
+    return slotWidthFor(board.getViewport(), this.cursorFor(note.layerId), note)
   }
 
   // --- pointer ---
@@ -114,7 +138,7 @@ export class BoardInteraction {
       return
     }
 
-    const slot = pointToSlot(vp, this.subdivFor, x, y)
+    const slot = pointToSlot(vp, this.activeCursor(), x, y)
     if (!slot) return
     this.deps.onSelect(null)
     this.mode = { kind: 'place', latch, painted: new Set(), first: slot }
@@ -125,7 +149,7 @@ export class BoardInteraction {
     const vp = board.getViewport()
 
     if (this.mode.kind === 'idle') {
-      this.hoverSlot = pointToSlot(vp, this.subdivFor, x, y)
+      this.hoverSlot = pointToSlot(vp, this.activeCursor(), x, y)
       return
     }
 
@@ -189,7 +213,10 @@ export class BoardInteraction {
       return
     }
     const id = board.placeNote({
-      layerId: layer.id, pos: slot.pos, dur: slot.dur, pitch: slot.pitch,
+      layerId: layer.id,
+      pos: slot.pos,
+      dur: placementDuration({ start: slot.pos, dur: slot.dur }, this.deps.isKit(layer.id)),
+      pitch: slot.pitch,
     })
     const placed = board.getIndex().byId.get(id)
     if (placed) this.deps.audition(layer.id, slot.pitch, placed)
@@ -200,7 +227,7 @@ export class BoardInteraction {
     if (this.mode.kind !== 'place') return
     const { board } = this.deps
     const layer = board.activeLayer()
-    const slot = pointToSlot(board.getViewport(), this.subdivFor, x, y)
+    const slot = pointToSlot(board.getViewport(), this.activeCursor(), x, y)
     if (!slot) return
 
     const key = `${posKey(slot.pos)}:${slot.pitch}`
@@ -211,7 +238,10 @@ export class BoardInteraction {
 
     board.batch('Paint stones', () => {
       const id = board.placeNote({
-        layerId: layer.id, pos: slot.pos, dur: slot.dur, pitch: slot.pitch,
+        layerId: layer.id,
+        pos: slot.pos,
+        dur: placementDuration({ start: slot.pos, dur: slot.dur }, this.deps.isKit(layer.id)),
+        pitch: slot.pitch,
       })
       const placed = board.getIndex().byId.get(id)
       if (placed) this.deps.audition(layer.id, slot.pitch, placed)
@@ -225,7 +255,7 @@ export class BoardInteraction {
 
     // Resolve the slot under the ORIGINAL grab point, so the stone tracks the
     // pointer instead of snapping its head there.
-    const target = pointToSlot(vp, this.subdivFor, x - this.mode.grabDx, y)
+    const target = pointToSlot(vp, this.activeCursor(), x - this.mode.grabDx, y)
     if (!target) return
     if (!this.deps.allowsPitch(this.mode.note.layerId, target.pitch)) return
 
@@ -255,7 +285,7 @@ export class BoardInteraction {
     const vp = board.getViewport()
     const note = this.mode.note
 
-    const target = pointToSlot(vp, this.subdivFor, x, 0)
+    const target = pointToSlot(vp, this.activeCursor(), x, 0)
     if (!target) return
     // The new end is the far edge of the slot under the pointer, so a resize always
     // lands on a slot boundary (§7.2 "in slot increments").
@@ -289,38 +319,43 @@ export class BoardInteraction {
     board.setViewport(panBy(vp, -e.deltaX, -e.deltaY, size))
   }
 
-  // --- keyboard: quick-set split (§7.2) ---
+  // --- keyboard: quick-set grid (§7.2) ---
 
   /**
-   * `1`–`9`,`0` set splits 1–10; Shift+`1`–`6` set 11–16. Applies to the hovered
-   * slot's nested split when the pointer is inside a subdivided column, else to the
-   * column itself.
+   * `1`–`9`,`0` set `n` = 1–10; Shift+`1`–`6` reach 11–16. The keys are unchanged from
+   * the old per-column splits so muscle memory survives; only the *meaning* moved. `n`
+   * now sets the grid to `1/n` quarters over the hovered slot's column — regions made
+   * nesting meaningless, so there is no second level to fall through to.
+   *
+   * Every denominator 1–16 divides the §3.1 lattice, so no key can produce a value
+   * `validateGridValue` would reject.
+   *
+   * `[col, col + 1)` is the same default range the grid menu uses, and
+   * `setGridRange` is one command, so a keystroke is one undo (§7.3).
    */
-  quickSplit(digit: number, shift: boolean): boolean {
-    const split = shift ? digit + 10 : digit === 0 ? 10 : digit
-    if (split < 1 || split > 16) return false
+  quickGrid(digit: number, shift: boolean): boolean {
+    const n = shift ? digit + 10 : digit === 0 ? 10 : digit
+    if (n < 1 || n > 16) return false
     const slot = this.hoverSlot
     if (!slot) return false
 
     const { board } = this.deps
-    const layer = board.activeLayer()
     const col = slot.pos.col
-    const existing = board.subdivFor(layer.id, col)
-
-    if (!existing || existing.split === 1) {
-      board.setSubdiv(layer.id, col, split === 1 ? undefined : { split })
-      return true
-    }
-
-    // Inside a subdivided column the digit nests, per §7.2.
-    const slotW = 1 / existing.split
-    const idx = Math.min(existing.split - 1, Math.floor(toNumber(slot.pos.frac) / slotW))
-    const children = Array.from({ length: existing.split }, (_, i) =>
-      existing.children?.[i] ?? null)
-    children[idx] = split === 1 ? null : { split }
-    board.setSubdiv(layer.id, col, { split: existing.split, children })
+    board.setGridRange(board.activeLayer().id, pos(col), pos(col + 1), frac(1, n))
     return true
   }
+}
+
+/**
+ * §9.3 says drum durations are not a degree of freedom, and a whole-note grid would
+ * otherwise give a four-quarter kick — so kit placement takes the lesser of the slot
+ * and a 16th.
+ */
+export const KIT_MAX_DUR: Frac = frac(1, 4)
+
+/** The duration a stone placed in `slot` inherits (design §3.5). */
+export function placementDuration(slot: GridSlot, isKit: boolean): Frac {
+  return isKit && fracCmp(slot.dur, KIT_MAX_DUR) > 0 ? KIT_MAX_DUR : slot.dur
 }
 
 /** Screen x on the ruler back to a quarter position, for seek and loop (§7.2). */

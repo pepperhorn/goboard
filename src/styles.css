@@ -129,9 +129,9 @@ button, input, select {
   pointer-events: none;
 }
 
-/* --- subdivision editor --- */
+/* --- grid editor (§7.2) --- */
 
-.subdiv-menu {
+.grid-menu {
   position: fixed;
   z-index: 40;
   width: 268px;
@@ -142,12 +142,12 @@ button, input, select {
   box-shadow: 0 12px 32px rgba(60, 50, 39, 0.22);
 }
 
-.subdiv-menu__title {
+.grid-menu__title {
   font-weight: 600;
   margin-bottom: 8px;
 }
 
-.subdiv-menu__label {
+.grid-menu__label {
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -155,14 +155,14 @@ button, input, select {
   margin: 8px 0 5px;
 }
 
-.subdiv-menu__grid {
+.grid-menu__presets {
   display: grid;
-  grid-template-columns: repeat(8, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: 3px;
 }
 
-.subdiv-chip {
-  padding: 4px 0;
+.grid-chip {
+  padding: 4px 2px;
   border: 1px solid var(--edge-soft);
   border-radius: 5px;
   background: rgba(255, 255, 255, 0.4);
@@ -170,44 +170,57 @@ button, input, select {
   font-size: 11px;
 }
 
-.subdiv-chip:hover { background: rgba(255, 255, 255, 0.8); }
+.grid-chip:hover { background: rgba(255, 255, 255, 0.8); }
 
-.subdiv-chip--on {
+.grid-chip--on {
   background: var(--accent);
   border-color: var(--accent);
   color: #fff;
   font-weight: 600;
 }
 
-.subdiv-menu__slots {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
+.grid-menu__custom {
+  display: flex;
+  align-items: center;
   gap: 4px;
 }
 
-.subdiv-slot {
-  display: flex;
-  align-items: center;
-  gap: 3px;
-}
-
-.subdiv-slot__index {
-  font-size: 10px;
-  color: var(--ink-dim);
-  width: 12px;
-}
-
-.subdiv-slot__select {
-  flex: 1;
+.grid-menu__input {
+  width: 3.5em;
   min-width: 0;
-  padding: 2px;
+  padding: 2px 4px;
   border: 1px solid var(--edge-soft);
   border-radius: 4px;
   background: rgba(255, 255, 255, 0.5);
   font-size: 11px;
+  text-align: center;
 }
 
-.subdiv-menu__note {
+.grid-menu__slash {
+  color: var(--ink-dim);
+  font-size: 12px;
+}
+
+.grid-menu__apply {
+  margin-left: auto;
+  padding: 3px 10px;
+  border: 1px solid var(--edge-soft);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.4);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.grid-menu__apply:hover { background: rgba(255, 255, 255, 0.8); }
+
+.grid-menu__error {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: #a3341f;
+}
+
+.grid-menu__note {
   margin-top: 10px;
   font-size: 11px;
   line-height: 1.4;
