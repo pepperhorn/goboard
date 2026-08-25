@@ -5,7 +5,6 @@ import type { Command } from '../core/command'
 import { NoteIndex } from '../core/noteIndex'
 import { buildTempoMap } from '../core/tempo'
 import type { TempoMap } from '../core/tempo'
-import { LATTICE } from '../core/frac'
 import type { Meter } from '../core/meter'
 import { buildMeterMap, validateMeter } from '../core/meter'
 import { ORIGIN, cmp as posCmp, eq as posEq } from '../core/pos'
@@ -378,19 +377,16 @@ export class BoardStore {
    * Add a meter change, or replace the one already at that position.
    *
    * Throws a `RangeError` naming the failing field for anything `validateMeter` would
-   * reject — a triplet `beatUnit`, an empty or non-integer `groups` — so the grid menu
-   * can report it the way it reports an off-lattice tuplet, rather than letting an
-   * unrenderable meter into the project. `validateMeter` guards the SMF
-   * power-of-two rule; the lattice check below is the §3.1 half it does not cover,
-   * and this is the only door a meter enters the project through.
+   * reject — a triplet `beatUnit`, one off the §3.1 lattice, an empty or non-integer
+   * `groups` — so the grid menu can report it the way it reports an off-lattice tuplet,
+   * rather than letting an unrenderable meter into the project.
+   *
+   * The validator is deliberately the *same* function the file reader calls
+   * (`readMeterMap`, `project.ts`): a rule enforced only here would be a rule a
+   * hand-edited `.go.json` could walk straight past.
    */
   setMeter(meter: Meter): void {
     const m = validateMeter(meter, 'meter')
-    if (LATTICE % m.beatUnit.d !== 0) {
-      throw new RangeError(
-        `meter.beatUnit: denominator ${m.beatUnit.d} is not on the §3.1 lattice`,
-      )
-    }
     const prev = this.meter
     const next = this.meterMapWith(m)
     this.run({

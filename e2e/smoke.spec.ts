@@ -157,6 +157,55 @@ test('the grid menu applies a preset and reports an off-lattice tuplet (§7.2)',
  * committed command, so "Set loop" then "Move meter" then "Remove meter" is direct
  * evidence that each gesture landed on the intended handler and committed once.
  */
+/**
+ * Centres of the meter marker chips currently painted in the ruler's top band.
+ *
+ * The chips are canvas pixels, so the only way to assert where a marker *is* — rather
+ * than that a command with the right label committed — is to read them back. Chip fill
+ * is the one colour in the band with blue > red > green; the white label punches small
+ * gaps in each chip, so adjacent runs are merged before the centres are taken.
+ */
+async function meterChipXs(page: Page): Promise<number[]> {
+  return page.locator('.board-ruler').evaluate((el) => {
+    const canvas = el as HTMLCanvasElement
+    const data = canvas.getContext('2d')!.getImageData(0, 6, canvas.width, 1).data
+    const runs: [number, number][] = []
+    let start = -1
+    for (let x = 0; x <= canvas.width; x++) {
+      const r = data[x * 4] ?? 0, g = data[x * 4 + 1] ?? 0, b = data[x * 4 + 2] ?? 0
+      const chip = x < canvas.width && b > r && r > g
+      if (chip && start < 0) start = x
+      if (!chip && start >= 0) {
+        const last = runs[runs.length - 1]
+        if (last && start - last[1] <= 12) last[1] = x - 1
+        else runs.push([start, x - 1])
+        start = -1
+      }
+    }
+    return runs.map(([a, b]) => (a + b) / 2)
+  })
+}
+
+/** Screen x of the playhead line on the overlay, or `null` when it is not drawn. */
+async function playheadX(page: Page): Promise<number | null> {
+  return page.locator('.board-overlay').evaluate((el) => {
+    const canvas = el as HTMLCanvasElement
+    const y = Math.floor(canvas.height / 2)
+    const data = canvas.getContext('2d')!.getImageData(0, y, canvas.width, 1).data
+    let best = -1
+    let bestAlpha = 0
+    for (let x = 0; x < canvas.width; x++) {
+      const r = data[x * 4] ?? 0, g = data[x * 4 + 1] ?? 0, b = data[x * 4 + 2] ?? 0
+      const a = data[x * 4 + 3] ?? 0
+      if (a > bestAlpha && r > 120 && r > g * 1.8 && g > b) {
+        bestAlpha = a
+        best = x
+      }
+    }
+    return best < 0 ? null : best
+  })
+}
+
 test('meter markers own the ruler top band, and seek/loop still own the rest (§7.2)', async ({ page }) => {
   await page.goto('/')
 
@@ -186,10 +235,38 @@ test('meter markers own the ruler top band, and seek/loop still own the rest (§
   await expect(page.locator('.btn-loop')).toHaveClass(/is-on/)
   await expect(undoLabel).toHaveText('Set loop')
 
-  // --- below the band: a plain click seeks, and seeking commits nothing
+  /*
+   * --- below the band: a plain click still seeks, and seeking commits nothing.
+   *
+   * The transport has to be running for this to be observable at all: while stopped the
+   * app's playhead rAF clears `playheadRef` on the frame after a seek, so the line is
+   * painted and gone again. With it running, the seek's effect is the playhead jumping
+   * from near the origin to the clicked column.
+   */
+  // Loop playback off first, or the transport would wrap the playhead back into the
+  // 2–4 region it was just given and the seek's effect would be raced away. The toggle
+  // is UI state, not a command, so it commits nothing.
+  await page.locator('.btn-loop').click()
+  await expect(page.locator('.btn-loop')).not.toHaveClass(/is-on/)
+
+  await page.locator('.btn-play').click()
+  await expect(page.locator('.btn-play__label')).toHaveText('Stop')
+  await expect.poll(() => playheadX(page)).not.toBeNull()
+  const beforeSeek = await playheadX(page)
+  expect(beforeSeek, 'the playhead starts near the origin').toBeLessThan(2 * COL)
+
   box = await rulerBox()
   await page.mouse.click(box.x + 6 * COL, box.y + BELOW)
+  // The board's x origin is the ruler's, so column 6 is 6 * COL on the overlay too.
+  // The tolerance absorbs however far the clock advanced between click and read.
+  await expect
+    .poll(async () => playheadX(page) ?? -1, { message: 'playhead jumped to column 6' })
+    .toBeGreaterThan(6 * COL - 20)
+  expect(await playheadX(page)).toBeLessThan(6 * COL + 3 * COL)
   await expect(undoLabel).toHaveText('Set loop')
+
+  await page.locator('.btn-play').click()
+  await expect(page.locator('.btn-play__label')).toHaveText('Play')
 
   // --- below the band: right-click still opens the grid editor, which now also
   // carries the meter section a new meter is dropped from. The column is kept near
@@ -231,4 +308,54 @@ test('meter markers own the ruler top band, and seek/loop still own the rest (§
   await page.mouse.click(box.x + 2, box.y + BAND, { button: 'right' })
   await expect(page.locator('.grid-menu')).toBeVisible()
   await expect(undoLabel).toHaveText('Remove meter')
+  await page.keyboard.press('Escape')
+  await expect(page.locator('.grid-menu')).toHaveCount(0)
+
+  /*
+   * --- a meter that does not sit on a whole column.
+   *
+   * Under a 7/8 the bars are 3.5 quarters long, so a dragged marker lands at 5 1/2 —
+   * and the grid editor is opened for a whole column. Matching the two by equality
+   * made such a meter invisible to the menu: no Remove button, and a preset click
+   * added a second meter at column 5 instead of replacing the one at 5 1/2.
+   */
+  box = await rulerBox()
+  await page.mouse.click(box.x + 2 * COL, box.y + BELOW, { button: 'right' })
+  await menu.locator('.meter-chip', { hasText: /^7\/8$/ }).click()
+  box = await rulerBox()
+  await page.mouse.click(box.x + 6 * COL, box.y + BELOW, { button: 'right' })
+  await menu.locator('.meter-chip', { hasText: /^3\/4$/ }).click()
+  await expect(undoLabel).toHaveText('Set meter')
+  expect(await meterChipXs(page)).toHaveLength(3)
+
+  // Drag it to 5.6 quarters: the surrounding 7/8 puts a bar line at 5 1/2, so that is
+  // where it lands — a whole-quarter snap would have put it at 6, back where it was.
+  box = await rulerBox()
+  await page.mouse.move(box.x + 6 * COL, box.y + BAND)
+  await page.mouse.down()
+  await page.mouse.move(box.x + 5.6 * COL, box.y + BAND, { steps: 8 })
+  await page.mouse.up()
+  await expect(undoLabel).toHaveText('Move meter')
+  const dragged = await meterChipXs(page)
+  expect(dragged).toHaveLength(3)
+  // Within a pixel: the chip's left edge is rounded to a whole pixel when drawn.
+  expect(Math.abs((dragged[2] ?? 0) - 5.5 * COL)).toBeLessThan(2)
+
+  // Column 5 contains it, so the menu opened there finds it, offers Remove, and a
+  // preset replaces it in place instead of adding a fourth marker at column 5.
+  box = await rulerBox()
+  await page.mouse.click(box.x + 5 * COL, box.y + BELOW, { button: 'right' })
+  await expect(menu.locator('.meter-menu__remove')).toBeVisible()
+  await menu.locator('.meter-chip', { hasText: /^2\/4$/ }).click()
+  await expect(undoLabel).toHaveText('Set meter')
+  const replaced = await meterChipXs(page)
+  expect(replaced).toHaveLength(3)
+  expect(Math.abs((replaced[2] ?? 0) - 5.5 * COL)).toBeLessThan(2)
+
+  // And the Remove button deletes that same meter rather than one column over.
+  box = await rulerBox()
+  await page.mouse.click(box.x + 5 * COL, box.y + BELOW, { button: 'right' })
+  await menu.locator('.meter-menu__remove').click()
+  await expect(undoLabel).toHaveText('Remove meter')
+  expect(await meterChipXs(page)).toHaveLength(2)
 })

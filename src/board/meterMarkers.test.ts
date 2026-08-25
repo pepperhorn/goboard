@@ -112,4 +112,16 @@ describe('quantizeMeterDrop', () => {
     const rest: readonly Meter[] = buildMeterMap([DEFAULT_METER])
     expect(quantizeMeterDrop(rest, 8)).toEqual(pos(8))
   })
+
+  /*
+   * There is no float fallback: rounding `q` to a column would let a float decide a
+   * column index (§3.1) and would answer a question this function cannot answer. The
+   * only way to reach it is a map so malformed that its window holds no bar line, and
+   * `barLinesIn` throws on that first — so a caller never sees a wrong answer.
+   */
+  it('throws rather than rounding when no bar line can be found', () => {
+    expect(() => quantizeMeterDrop([], 4)).toThrow(RangeError)
+    expect(() => quantizeMeterDrop([{ pos: pos(4), beatUnit: frac(1), groups: [4] }], 8))
+      .toThrow(/anchored/)
+  })
 })

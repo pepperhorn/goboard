@@ -92,11 +92,26 @@ export function GridMenu(
   const layer = board.layer(layerId)
   const current: Frac = gridValueAt(board.gridFor(layerId), from)
 
-  // A meter change already sitting exactly here — the one this menu would replace,
-  // and the one the Remove button deletes. Index 0 anchors the map and is never
-  // removable (`BoardStore.removeMeter`), so its button is not offered.
+  /*
+   * The meter change this menu acts on: the first one **inside the clicked column**,
+   * not the one at exactly `from`.
+   *
+   * `from` is a whole column (the caller floors the clicked quarter), but a meter's
+   * position need not be — a marker dragged under 7/8 lands on a 3.5-quarter bar line,
+   * so it sits at 11 1/2. Comparing for equality made such a meter invisible to this
+   * menu: no Remove button, and a preset click added a *second* meter at column 11
+   * instead of replacing the one at 11 1/2. Scoping by column matches the range this
+   * menu already describes in its title.
+   *
+   * Index 0 anchors the map and is never removable (`BoardStore.removeMeter`), so its
+   * button is not offered.
+   */
   const meterMap = board.getMeterMap()
-  const meterIndexHere = meterMap.findIndex((m) => posEq(m.pos, from))
+  const meterIndexHere = meterMap.findIndex(
+    (m) => m.pos.col === from.col && (from.frac.n === 0 || posEq(m.pos, from)),
+  )
+  /** Edits replace the meter that is here, so they must land on *its* position. */
+  const meterPos: Pos = meterMap[meterIndexHere]?.pos ?? from
 
   useEffect(() => {
     const onDown = (e: MouseEvent) => {
@@ -140,7 +155,7 @@ export function GridMenu(
    */
   const applyMeter = (beatUnit: Frac, groups: readonly number[]) => {
     try {
-      board.setMeter({ pos: from, beatUnit, groups })
+      board.setMeter({ pos: meterPos, beatUnit, groups })
       onClose()
     } catch (e) {
       setMeterError(e instanceof RangeError ? e.message.replace(/^meter\./, '') : String(e))
@@ -157,8 +172,9 @@ export function GridMenu(
       if (!Number.isInteger(unit) || unit <= 0) {
         throw new RangeError(`unit: must be a positive integer, got "${meterUnit}"`)
       }
-      // `frac` itself throws for a denominator off the lattice, so this stays inside
-      // the try: an unreachable beat unit reports, it does not crash React.
+      // `frac` throws only for a denominator *above* the lattice bound, so it is
+      // `validateMeter` inside `setMeter` that rejects an off-lattice one — either way
+      // the throw happens inside this try and is reported, not crashed into React.
       applyMeter(frac(4, unit), parseGroups(meterGroups, beats))
     } catch (e) {
       setMeterError(e instanceof RangeError ? e.message.replace(/^meter\./, '') : String(e))

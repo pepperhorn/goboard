@@ -1,5 +1,6 @@
 import type { Frac, Pos } from './types'
 import {
+  LATTICE,
   add as fadd,
   div as fdiv,
   frac,
@@ -83,7 +84,18 @@ function midiDenominatorOrUndefined(beatUnit: Frac): number | undefined {
  * failing path — the same discipline `validateGridValue` uses (`gridValue.ts`).
  *
  * `groups` must be non-empty with every entry a positive integer, and `beatUnit` must
- * be positive with `4 / beatUnit` a power of two. Both are load-bearing: an empty or
+ * be positive, on the §3.1 denominator lattice, and such that `4 / beatUnit` is a power
+ * of two.
+ *
+ * The lattice check is *here*, not at the UI door, because the two rules are not the
+ * same rule and neither implies the other: `beatUnit = 1/512` gives an SMF denominator
+ * of 2048, a perfectly good power of two, while 512 does not divide
+ * `L = 2^8·3^4·5^2·7^2·11^2·13^2`. `normalize` only rejects denominators *above* L, so
+ * without this a hand-edited `.go.json` carrying `1/512` would load. This mirrors
+ * `validateGridValue`, which has checked the lattice on the import path since Task 5 —
+ * a guard that lives only on the menu is a guard the file reader does not have.
+ *
+ * The rest is load-bearing too: an empty or
  * non-positive `groups` would make `barLength` zero or negative, which would hang the
  * walk in `barLinesIn` / `groupLinesIn` rather than fail — `barLength` re-checks this
  * defensively for exactly that reason, but rejecting it here is what keeps a malformed
@@ -98,6 +110,11 @@ export function validateMeter(v: unknown, where: string): Meter {
   const beatUnit = readFracLocal(raw.beatUnit, `${where}.beatUnit`)
   if (!fIsPositive(beatUnit)) {
     throw new RangeError(`${where}.beatUnit: must be positive, got ${fracToString(beatUnit)}`)
+  }
+  if (LATTICE % beatUnit.d !== 0) {
+    throw new RangeError(
+      `${where}.beatUnit: denominator ${beatUnit.d} is not on the §3.1 lattice`,
+    )
   }
   if (midiDenominatorOrUndefined(beatUnit) === undefined) {
     throw new RangeError(

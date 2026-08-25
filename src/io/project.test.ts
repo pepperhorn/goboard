@@ -801,6 +801,19 @@ describe('meterMap persistence', () => {
     expect(() => projectFromString(JSON.stringify(bad))).toThrow(/meterMap\[0\]\.beatUnit/)
   })
 
+  /*
+   * The read/write asymmetry Task 5 found for grid values, and Task 13's review found
+   * again for meters: a rule that lives only on the menu is a rule the file reader
+   * does not have. `4 / (1/512) = 2048` is a power of two, so the SMF rule passes it;
+   * 512 does not divide the §3.1 lattice, so `validateMeter` must not.
+   */
+  it('rejects a meter whose beatUnit is off the §3.1 lattice, naming the path', () => {
+    const bad = JSON.parse(projectToBlobString(createEmptyProject())) as Record<string, unknown>
+    bad.meterMap = [{ pos: { col: 0, frac: { n: 0, d: 1 } }, beatUnit: { n: 1, d: 512 }, groups: [4] }]
+    expect(() => projectFromString(JSON.stringify(bad)))
+      .toThrow(/meterMap\[0\]\.beatUnit.*lattice/)
+  })
+
   it('rejects an out-of-order meterMap', () => {
     const bad = JSON.parse(projectToBlobString(createEmptyProject())) as Record<string, unknown>
     bad.meterMap = [

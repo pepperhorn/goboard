@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { frac } from './frac'
+import { LATTICE, frac } from './frac'
 import { pos } from './pos'
 import {
   DEFAULT_METER,
@@ -114,6 +114,29 @@ describe('validateMeter', () => {
 
   it('names the failing path in its error', () => {
     expect(() => validateMeter(null, 'meterMap[2]')).toThrow(/meterMap\[2\]/)
+  })
+
+  /*
+   * The power-of-two rule and the §3.1 lattice are two different rules and neither
+   * implies the other. `4 / (1/512) = 2048` is a fine SMF denominator, but 512 does
+   * not divide L = 2^8*3^4*5^2*7^2*11^2*13^2, and `normalize` only rejects
+   * denominators *above* L. Checking this in the validator rather than in the store
+   * is what puts the guard on the import path as well as the UI path.
+   */
+  it('rejects a beat unit off the §3.1 lattice even when its SMF denominator is a power of two', () => {
+    expect(midiDenominator(frac(1, 512))).toBe(2048)
+    expect(LATTICE % 512).not.toBe(0)
+    expect(() =>
+      validateMeter({ pos: { col: 0, frac: { n: 0, d: 1 } }, beatUnit: { n: 1, d: 512 }, groups: [4] }, 'meterMap[1]'),
+    ).toThrow(/meterMap\[1\]\.beatUnit: denominator 512 is not on the §3.1 lattice/)
+  })
+
+  it('still accepts every beat unit the lattice does reach', () => {
+    for (const d of [1, 2, 4, 8, 16, 32, 64, 128, 256]) {
+      expect(() =>
+        validateMeter({ pos: { col: 0, frac: { n: 0, d: 1 } }, beatUnit: { n: 1, d }, groups: [4] }, 'm'),
+      ).not.toThrow()
+    }
   })
 })
 

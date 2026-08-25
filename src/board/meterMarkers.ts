@@ -117,7 +117,15 @@ export function quantizeMeterDrop(map: readonly Meter[], q: number): Pos {
       best = p
     }
   }
-  // Unreachable for a well-formed map — consecutive bar starts are at most `w` apart,
-  // so the window always contains one — but a fallback beats a thrown draw path.
-  return best ?? pos(Math.max(1, Math.round(q)))
+  /*
+   * Unreachable: consecutive bar starts are at most `w` apart, and the window spans at
+   * least `[max(0, q-w)-1, max(q,0)+w+1]`, so it always holds a bar start strictly
+   * after the origin. Throwing rather than falling back to `pos(Math.round(q))` is
+   * deliberate — that fallback would let a float decide a column index, which §3.1
+   * forbids, and it would answer a question this function could not actually answer.
+   */
+  if (best === null) {
+    throw new RangeError(`quantizeMeterDrop: no bar line near ${q} — the meter map is malformed`)
+  }
+  return best
 }

@@ -81,13 +81,17 @@ describe('BoardStore.setMeter', () => {
     expect(b.getMeterMap()).toHaveLength(1)
   })
 
-  it('rejects a beat unit off the §3.1 lattice, which validateMeter alone would pass', () => {
+  /*
+   * The lattice rule lives in `validateMeter`, not here, so the file reader has it too
+   * (`readMeterMap`). This test is the UI half of that one guard: 4 / (1/512) = 2048
+   * is a power of two, so the SMF rule passes it, and 512 does not divide the lattice.
+   */
+  it('inherits validateMeter\'s §3.1 lattice rule, which the power-of-two rule does not imply', () => {
     const b = store()
-    // 4 / (1/512) = 2048 is a power of two, so `validateMeter` is happy; 512 does not
-    // divide the lattice, so the store is not.
     expect(() => b.setMeter({ pos: pos(4), beatUnit: frac(1, 512), groups: [4] }))
-      .toThrow(/lattice/)
+      .toThrow(/meter\.beatUnit.*lattice/)
     expect(b.getMeterMap()).toHaveLength(1)
+    expect(b.commitVersion).toBe(0)
   })
 })
 
