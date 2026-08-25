@@ -48,9 +48,15 @@ export function gridValueAt(regions: readonly GridRegion[], at: Pos): Frac {
  * `k = floor((at - start) / v)` in exact rationals, so the answer is the same at every
  * zoom and in negative columns. The duration is clipped by the next region's start,
  * which is what makes a boundary-adjacent slot short rather than overlapping.
+ *
+ * `knownIndex`, when given, is used in place of a fresh `regionIndexAt` search — for a
+ * caller (`gridCursor.ts`) that already knows which region governs `at` and does not
+ * want to pay for a binary search it has already done. Passing the wrong index for `at`
+ * gives wrong answers; only pass a value obtained the same way `regionIndexAt` would
+ * compute it.
  */
-export function slotAt(regions: readonly GridRegion[], at: Pos): GridSlot {
-  const i = regionIndexAt(regions, at)
+export function slotAt(regions: readonly GridRegion[], at: Pos, knownIndex?: number): GridSlot {
+  const i = knownIndex ?? regionIndexAt(regions, at)
   const anchor = i < 0 ? canonicalize(0, frac(0)) : regions[i]!.start
   const value = i < 0 ? DEFAULT_GRID_VALUE : regions[i]!.value
 
