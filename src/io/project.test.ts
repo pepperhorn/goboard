@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import type { Layer, Note, Project } from '../core/types'
+import type { Layer, Note, Project, Subdiv } from '../core/types'
 import { frac } from '../core/frac'
 import { pos } from '../core/pos'
+import { enumerateSlots } from '../core/subdiv'
+import { slotStartsIn } from '../core/grid'
 import { BoardStore } from '../state/boardStore'
 import {
   PROJECT_FILE_EXT,
@@ -82,6 +84,44 @@ function expectReject(raw: unknown, names: RegExp): void {
   expect(() => deserializeProject(raw)).toThrow(names)
 }
 
+/**
+ * A minimal v1 `.go.json` file, plain JSON (no `Frac`/`Map` to build) since v1 is only
+ * ever read, never written. Two subdiv columns, so a duplicate-column corruption has
+ * something to collide with.
+ */
+const V1_FIXTURE = {
+  version: 1,
+  name: 'Old',
+  tempoMap: [{ pos: { col: 0, frac: { n: 0, d: 1 } }, bpm: 120 }],
+  layers: [
+    {
+      id: 'l1',
+      name: 'Piano',
+      color: '#c33',
+      instrumentId: 'ph-piano-1',
+      channel: 0,
+      audible: true,
+      visible: true,
+      defaultVel: 96,
+      order: 0,
+      colVel: [],
+      subdivs: [
+        [2, { split: 3 }],
+        [5, { split: 1 }],
+      ],
+    },
+  ],
+  notes: [],
+  activeLayerId: 'l1',
+}
+
+/** A deep-cloned `V1_FIXTURE` with one field broken. */
+function corruptV1(mutate: (raw: any) => void): unknown {
+  const raw = JSON.parse(JSON.stringify(V1_FIXTURE))
+  mutate(raw)
+  return raw
+}
+
 describe('round trip', () => {
   it('restores a non-trivial project exactly, Maps included', () => {
     const back = deserializeProject(serializeProject(FIXTURE))
@@ -132,6 +172,28 @@ describe('round trip', () => {
     expect(raw.layers[0].grid.map((r: { start: { col: number } }) => r.start.col)).toEqual([
       -1, 3,
     ])
+  })
+
+  it('throws at write time rather than writing a file it cannot reopen', () => {
+    // A grid value that never passed through `readGrid` — built in-app, or handed to
+    // `serializeProject` directly — must fail loudly here. Otherwise autosave (which
+    // never reads its own bytes back) could write a project the app cannot reopen.
+    const p = createEmptyProject()
+    const offLattice: Project = {
+      ...p,
+      layers: p.layers.map((l, i) =>
+        i === 0 ? { ...l, grid: [{ start: pos(0), value: { n: 1, d: 17 } }] } : l,
+      ),
+    }
+    expect(() => serializeProject(offLattice)).toThrow(/lattice/)
+
+    const outOfRange: Project = {
+      ...p,
+      layers: p.layers.map((l, i) =>
+        i === 0 ? { ...l, grid: [{ start: pos(0), value: frac(8) }] } : l,
+      ),
+    }
+    expect(() => serializeProject(outOfRange)).toThrow(/between 1\/256 and 4/)
   })
 
   it('omits absent optionals rather than writing nulls', () => {
@@ -576,6 +638,86 @@ describe('format v2 — grid regions (design doc §3.8)', () => {
       { start: pos(2), value: frac(1, 3) },
       { start: pos(3), value: frac(1) },
     ])
+  })
+
+  it('migrates several layers losslessly: nested trees, negative columns, a no-op', () => {
+    // The §3.2 worked example: 16ths with a triplet 32nd nest on the last 16th.
+    const nested: Subdiv = { split: 4, children: [null, null, null, { split: 3 }] }
+    const nested2: Subdiv = { split: 2, children: [{ split: 3 }, null] }
+    const flat: Subdiv = { split: 5 }
+    const noOp: Subdiv = { split: 1 } // an explicit no-op entry: same as no entry at all
+
+    const layerSubdivs = new Map<string, Map<number, Subdiv>>([
+      ['l1', new Map([[-3, nested], [-1, noOp]])],
+      ['l2', new Map([[0, flat], [2, nested2]])],
+      ['l3', new Map()], // no subdivided columns at all
+    ])
+
+    const v1 = {
+      version: 1,
+      name: 'Old multi-layer',
+      tempoMap: [{ pos: { col: 0, frac: { n: 0, d: 1 } }, bpm: 120 }],
+      layers: [...layerSubdivs.entries()].map(([id, subdivs], order) => ({
+        id,
+        name: id,
+        color: '#4f8cff',
+        instrumentId: 'ph-piano-1',
+        channel: order,
+        audible: true,
+        visible: true,
+        defaultVel: 96,
+        order,
+        colVel: [],
+        subdivs: [...subdivs.entries()],
+      })),
+      notes: [],
+      activeLayerId: 'l1',
+    }
+
+    const migrated = projectFromString(JSON.stringify(v1))
+    expect(migrated.version).toBe(2)
+
+    // The actual contract: every enumerated slot start of every subdivided column,
+    // migrated or not, is exactly what `slotStartsIn` reports over the new grid —
+    // not that the region list takes any particular shape.
+    for (const layer of migrated.layers) {
+      const subdivs = layerSubdivs.get(layer.id)!
+      for (const [col, sd] of subdivs) {
+        const expected = enumerateSlots(sd).map((slot) => pos(col, slot.start.n, slot.start.d))
+        const actual = slotStartsIn(layer.grid, pos(col), pos(col + 1)).filter(
+          (p) => p.col === col,
+        )
+        expect(actual, `layer ${layer.id} col ${col}`).toEqual(expected)
+      }
+    }
+  })
+
+  it('rejects a malformed v1 subdivision through validateSubdiv, naming the path', () => {
+    expectReject(
+      corruptV1((r) => (r.layers[0].subdivs[0][1] = { split: 5, children: [null, null] })),
+      /layers\[0\]\.subdivs\[2\]/,
+    )
+    expectReject(
+      corruptV1((r) => (r.layers[0].subdivs[0][1] = { split: 17 })),
+      /layers\[0\]\.subdivs\[2\]/,
+    )
+    expectReject(
+      corruptV1(
+        (r) =>
+          (r.layers[0].subdivs[0][1] = {
+            split: 1,
+            children: [{ split: 2, children: [null, null] }],
+          }),
+      ),
+      /layers\[0\]\.subdivs\[2\]/,
+    )
+  })
+
+  it('rejects a duplicate column in a v1 subdivs map', () => {
+    expectReject(
+      corruptV1((r) => (r.layers[0].subdivs[1][0] = 2)),
+      /layers\[0\]\.subdivs.*2/,
+    )
   })
 
   it('rejects a grid value off the lattice, naming the path', () => {

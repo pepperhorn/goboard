@@ -13,9 +13,11 @@ import { NoteIndex } from '../core/noteIndex'
  *
  * Two invariants make this module more than `JSON.stringify`:
  *
- * 1. **Deterministic bytes.** `Map` has no JSON form, so `colVel` and `subdivs` become
- *    `[[col, value], ...]` entry arrays — and those entries are *sorted by column*,
- *    never left in insertion order. Autosave (§10) diffs the serialized string to
+ * 1. **Deterministic bytes.** `Map` has no JSON form, so `colVel` becomes a
+ *    `[[col, value], ...]` entry array — sorted by column, never left in insertion
+ *    order. `grid` is already a sorted, deduplicated list (§3.8), so it is written
+ *    in list order instead: sorting it would hide a caller bug (§3.2 §3.8 note in
+ *    `writeGrid`). Autosave (§10) diffs the serialized string to
  *    decide whether anything changed, so two projects that are equal must serialize
  *    identically; otherwise dragging a note back where it came from writes a new
  *    revision. Every object is rebuilt key-by-key here for the same reason: JSON key
@@ -77,14 +79,18 @@ function writeGridRegion(r: GridRegion): unknown {
 
 /**
  * A layer's `grid` is already canonical (§3.2): sorted by `start`, no duplicate
- * starts. Writing therefore only asserts the invariant rather than re-sorting — a
- * caller that hands in an unsorted list has a bug, and silently sorting it would
- * both hide that bug and, because two different orderings would then serialize to
- * the same bytes, make it impossible to tell them apart on the way back in.
+ * starts, every value on the §3.1 lattice and in the §3.1 range. Writing therefore
+ * only asserts those invariants rather than repairing them — a caller that hands in
+ * an unsorted list, or a value `readGrid` would reject, has a bug. Silently sorting
+ * would hide the first; skipping the value check would let an unopenable file reach
+ * disk, since autosave writes without ever reading the bytes back (§10) — the write
+ * that produced it would look like it succeeded right up until the next reload.
  */
 function writeGrid(regions: readonly GridRegion[], where: string): unknown[] {
-  for (let i = 1; i < regions.length; i++) {
-    if (pcmp(regions[i - 1]!.start, regions[i]!.start) >= 0) {
+  for (let i = 0; i < regions.length; i++) {
+    const region = regions[i]!
+    validateGridValue(region.value, `${where}[${i}].value`)
+    if (i > 0 && pcmp(regions[i - 1]!.start, region.start) >= 0) {
       throw new Error(`Project: ${where} is not sorted into canonical order — this is a bug`)
     }
   }
