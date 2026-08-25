@@ -1,0 +1,53 @@
+{
+  "recordedBy": "playwright/chromium",
+  "totalNotes": 50000,
+  "board": {
+    "width": 1218,
+    "height": 676
+  },
+  "dpr": 1,
+  "phases": [
+    {
+      "name": "pan @ min zoom",
+      "frames": {
+        "count": 180,
+        "mean": 1.2694444444444444,
+        "p50": 1.100000023841858,
+        "p95": 2.200000047683716,
+        "max": 4.299999952316284,
+        "overBudget": 0
+      },
+      "notesInView": 4974,
+      "pxPerQuarter": 24,
+      "pxPerSemitone": 8
+    },
+    {
+      "name": "pan @ default zoom",
+      "frames": {
+        "count": 120,
+        "mean": 0.6825000027815501,
+        "p50": 0.6000000238418579,
+        "p95": 1.600000023841858,
+        "max": 2.4000000953674316,
+        "overBudget": 0
+      },
+      "notesInView": 818,
+      "pxPerQuarter": 96,
+      "pxPerSemitone": 16
+    },
+    {
+      "name": "zoom sweep",
+      "frames": {
+        "count": 120,
+        "mean": 1.8050000011920928,
+        "p50": 1.600000023841858,
+        "p95": 2.899999976158142,
+        "max": 8.899999976158142,
+        "overBudget": 0
+      },
+      "notesInView": 207,
+      "pxPerQuarter": 210.34782173120763,
+      "pxPerSemitone": 35.05797028853462
+    }
+  ]
+}

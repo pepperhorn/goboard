@@ -11,8 +11,9 @@
     "test:watch": "vitest",
     "typecheck": "tsc -b --noEmit",
     "gen:samples": "node scripts/gen-samples.mjs",
-    "test:e2e": "playwright test",
-    "test:all": "vitest run && playwright test"
+    "test:e2e": "playwright test --project=chromium",
+    "test:all": "vitest run && playwright test --project=chromium",
+    "bench": "playwright test --project=bench"
   },
   "dependencies": {
     "@tonejs/midi": "^2.0.28",

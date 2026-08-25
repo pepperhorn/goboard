@@ -160,6 +160,47 @@ export function zoomAbout(
 }
 
 /** True when stones are too small for the layer ring to read (§5.3 LOD). */
+/**
+ * Screen translation between two viewports, rounded to whole device pixels — the
+ * §5.3 self-blit's input.
+ *
+ * `null` means "no blit is possible": the zoom changed (every pixel moves, not just
+ * shifts), or the shift is at least a full surface (nothing of the old frame survives,
+ * so copying it is pure cost).
+ *
+ * The rounding is what makes the blit exact. A fractional offset would resample the
+ * whole board every frame — slower than the redraw it replaces, and blurry. The caller
+ * pairs this with `shiftedViewport` so the fraction that was rounded away is *carried*
+ * rather than accumulated: the canvas then holds a coherent picture of a viewport
+ * within half a device pixel of the true one, instead of drifting a little each frame.
+ */
+export function panDelta(
+  from: Viewport,
+  to: Viewport,
+  size: Size,
+  dpr: number,
+): { readonly dx: number; readonly dy: number } | null {
+  if (from.pxPerQuarter !== to.pxPerQuarter || from.pxPerSemitone !== to.pxPerSemitone) return null
+
+  const dx = Math.round((from.xQuarters - to.xQuarters) * to.pxPerQuarter * dpr) / dpr
+  const dy = Math.round((to.yPitch - from.yPitch) * to.pxPerSemitone * dpr) / dpr
+  if (!Number.isFinite(dx) || !Number.isFinite(dy)) return null
+  if (Math.abs(dx) >= size.width || Math.abs(dy) >= size.height) return null
+  return { dx, dy }
+}
+
+/** The viewport a surface actually shows after being blitted by `delta` (§5.3). */
+export function shiftedViewport(
+  from: Viewport,
+  delta: { readonly dx: number; readonly dy: number },
+): Viewport {
+  return {
+    ...from,
+    xQuarters: from.xQuarters - delta.dx / from.pxPerQuarter,
+    yPitch: from.yPitch + delta.dy / from.pxPerSemitone,
+  }
+}
+
 export const stoneRadius = (vp: Viewport, slotWidthPx: number): number =>
   Math.min(vp.pxPerSemitone, slotWidthPx) * 0.42
 

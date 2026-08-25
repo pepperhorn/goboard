@@ -3,7 +3,8 @@ import { pos } from '../core/pos'
 import {
   ANCHOR_PITCH, MAX_PITCH, MAX_PX_PER_QUARTER, MIN_PITCH, MIN_PX_PER_QUARTER,
   MIN_PX_PER_SEMITONE, clampVertical, initialViewport, panBy, pitchToCenterY, pitchToY,
-  posToX, quartersToX, visibleCols, visiblePitches, xToQuarters, yToPitch, zoomAbout,
+  panDelta, posToX, quartersToX, shiftedViewport, visibleCols, visiblePitches, xToQuarters,
+  yToPitch, zoomAbout,
 } from './viewport'
 import type { Size, Viewport } from './viewport'
 
@@ -147,5 +148,66 @@ describe('zoomAbout', () => {
     for (let i = 0; i < 20; i++) v = zoomAbout(v, 700, 300, 1 / 1.02, 1, SIZE)
     expect(xToQuarters(v, 700)).toBeCloseTo(q0, 6)
     expect(v.pxPerQuarter).toBeCloseTo(96, 6)
+  })
+})
+
+describe('panDelta / shiftedViewport (§5.3 self-blit)', () => {
+  it('measures the screen shift a pan produces', () => {
+    const from = vp()
+    // Two quarters right at 96 px/quarter: the content moves 192 px LEFT.
+    const to = vp({ xQuarters: 2 })
+    expect(panDelta(from, to, SIZE, 1)).toEqual({ dx: -192, dy: 0 })
+    // Raising yPitch scrolls the board down.
+    expect(panDelta(from, vp({ yPitch: 61 }), SIZE, 1)).toEqual({ dx: 0, dy: 16 })
+  })
+
+  it('rounds to whole device pixels, so the blit never resamples', () => {
+    const from = vp()
+    const to = vp({ xQuarters: 0.001 }) // 0.096 px at 96 px/quarter
+    expect(panDelta(from, to, SIZE, 1)).toEqual({ dx: -0, dy: 0 })
+    // At 2x the same shift is 0.192 device px — still under half a device pixel.
+    expect(panDelta(from, to, SIZE, 2)).toEqual({ dx: -0, dy: 0 })
+    // A shift of 0.3 CSS px rounds to nothing at 1x but to half a pixel at 2x.
+    const third = vp({ xQuarters: 0.3 / 96 })
+    expect(panDelta(from, third, SIZE, 1)).toEqual({ dx: -0, dy: 0 })
+    expect(panDelta(from, third, SIZE, 2)).toEqual({ dx: -0.5, dy: 0 })
+  })
+
+  it('refuses when the zoom changed — every pixel moves, not just shifts', () => {
+    const from = vp()
+    expect(panDelta(from, vp({ pxPerQuarter: 97 }), SIZE, 1)).toBeNull()
+    expect(panDelta(from, vp({ pxPerSemitone: 17 }), SIZE, 1)).toBeNull()
+  })
+
+  it('refuses when nothing of the old frame would survive', () => {
+    const from = vp()
+    const offScreen = vp({ xQuarters: SIZE.width / 96 })
+    expect(panDelta(from, offScreen, SIZE, 1)).toBeNull()
+    expect(panDelta(from, vp({ yPitch: 60 + SIZE.height / 16 }), SIZE, 1)).toBeNull()
+  })
+
+  it('shiftedViewport describes exactly what the blit put on screen', () => {
+    const from = vp()
+    const to = vp({ xQuarters: 2.004, yPitch: 61.003 })
+    const delta = panDelta(from, to, SIZE, 1)!
+    const shown = shiftedViewport(from, delta)
+
+    // Within half a device pixel of the real viewport, and never further — the
+    // rounding is carried, not accumulated.
+    expect(Math.abs(shown.xQuarters - to.xQuarters) * to.pxPerQuarter).toBeLessThanOrEqual(0.5)
+    expect(Math.abs(shown.yPitch - to.yPitch) * to.pxPerSemitone).toBeLessThanOrEqual(0.5)
+    // And re-measuring from what was shown yields no further shift.
+    expect(panDelta(shown, shown, SIZE, 1)).toEqual({ dx: 0, dy: 0 })
+  })
+
+  it('does not drift over a long pan', () => {
+    let shown = vp()
+    let live = vp()
+    for (let i = 0; i < 500; i++) {
+      live = panBy(live, -3.37, 0, SIZE) // a fractional-pixel pan, every frame
+      const delta = panDelta(shown, live, SIZE, 2)
+      if (delta) shown = shiftedViewport(shown, delta)
+    }
+    expect(Math.abs(shown.xQuarters - live.xQuarters) * live.pxPerQuarter).toBeLessThanOrEqual(0.5)
   })
 })

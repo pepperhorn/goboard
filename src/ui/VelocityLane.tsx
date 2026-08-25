@@ -17,6 +17,7 @@ import {
   velocityAtY,
 } from '../board/lane'
 import type { LaneScene, LaneSlot } from '../board/lane'
+import type { Viewport } from '../board/viewport'
 import type { BoardStore } from '../state/boardStore'
 import { useUiStore } from '../state/uiStore'
 import './lane.css'
@@ -39,8 +40,16 @@ import './lane.css'
 
 /** What the parent's frame callback drives. */
 export type LaneApi = {
-  /** Draw one lane frame. Resizes the backing store first, per §5.3. */
-  drawLane: (dpr: number, forced: boolean) => void
+  /**
+   * Draw one lane frame, driven by the board's single rAF owner (§5.3).
+   *
+   * `vp` is the viewport the board just drew with — which is not always the live one:
+   * a self-blitted pan shows a viewport rounded to whole device pixels, and the lane
+   * has to match it or its bars sit up to a pixel off the board's columns (§5.3).
+   * The backing store is re-sized only on a forced frame; `getBoundingClientRect` on
+   * every frame would flush layout 60 times a second for a size that changes on resize.
+   */
+  drawLane: (dpr: number, forced: boolean, vp?: Viewport) => void
   /** The live canvas, or null once unmounted. */
   canvas: () => HTMLCanvasElement | null
 }
@@ -253,11 +262,11 @@ export function VelocityLane({
 
   useEffect(() => {
     const api: LaneApi = {
-      drawLane: (dpr) => {
+      drawLane: (dpr, forced, vp) => {
         const surface = surfaceRef.current
         if (!surface) return
-        sizeSurface(surface, dpr)
-        paintLane(surface.ctx, board.getViewport(), surface.size, scene(), dpr)
+        if (forced) sizeSurface(surface, dpr)
+        paintLane(surface.ctx, vp ?? board.getViewport(), surface.size, scene(), dpr)
       },
       canvas: () => canvasRef.current,
     }

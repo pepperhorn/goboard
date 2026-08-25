@@ -270,3 +270,13 @@ button, input, select {
   flex: 1 1 auto;
   min-width: 0;
 }
+
+/* --- §5.3 benchmark page: the board and lane only, no chrome column --- */
+
+.bench-shell {
+  grid-template-columns: 1fr;
+  grid-template-areas:
+    "board"
+    "lane";
+  grid-template-rows: 1fr auto;
+}

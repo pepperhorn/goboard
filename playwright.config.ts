@@ -11,7 +11,6 @@ import { defineConfig, devices } from '@playwright/test'
  * produce different pixels than a developer's 2.
  */
 export default defineConfig({
-  testDir: './e2e',
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
@@ -23,6 +22,18 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium',
+      testDir: './e2e',
+      use: { ...devices['Desktop Chrome'], viewport: { width: 1280, height: 800 }, deviceScaleFactor: 1 },
+    },
+    {
+      // §5.3's benchmark. Separate because it is slow, serial by nature (a parallel
+      // worker on the same CPU is exactly the noise it must not measure), and read as
+      // a number rather than a pass/fail.
+      name: 'bench',
+      testDir: './bench',
+      fullyParallel: false,
+      workers: 1,
+      retries: 0,
       use: { ...devices['Desktop Chrome'], viewport: { width: 1280, height: 800 }, deviceScaleFactor: 1 },
     },
   ],

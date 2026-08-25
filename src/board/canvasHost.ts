@@ -89,9 +89,16 @@ export class FrameLoop {
   private mql: MediaQueryList | null = null
   private forceNext = true
 
+  /**
+   * `onFrame` receives the wall-clock cost of each drawn frame — the §5.3 benchmark
+   * number. Timing the callback rather than the interval between callbacks is the
+   * distinction that matters: the interval is 16.7 ms whether the draw took 2 ms or
+   * 15, and it is the draw that has to fit in the budget.
+   */
   constructor(
     private readonly isDirty: () => boolean,
     private readonly frame: FrameFn,
+    private readonly onFrame?: (ms: number) => void,
   ) {}
 
   start(): void {
@@ -104,7 +111,13 @@ export class FrameLoop {
       const forced = this.forceNext
       if (forced || this.isDirty()) {
         this.forceNext = false
-        this.frame(this.dpr, forced)
+        if (this.onFrame === undefined) {
+          this.frame(this.dpr, forced)
+        } else {
+          const started = performance.now()
+          this.frame(this.dpr, forced)
+          this.onFrame(performance.now() - started)
+        }
       }
       this.raf = requestAnimationFrame(tick)
     }

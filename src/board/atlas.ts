@@ -13,6 +13,13 @@ export const RADIUS_STEP = 0.5
 /** Below this radius the ring is sub-pixel, so stones render flat (§5.3 LOD). */
 export const RING_LOD_RADIUS = 4
 
+/**
+ * Largest texture the atlas will grow to, per side. Past this it restarts instead of
+ * doubling: a 4096² texture is 64 MB of VRAM, and the only way to need one is a long
+ * zoom gesture depositing sprites for buckets nothing will ask for again.
+ */
+export const MAX_ATLAS_SIDE = 2048
+
 export type StoneSpec = {
   /** White-key pitch classes take a white stone, black-key rows a black one (§1). */
   readonly white: boolean
@@ -115,7 +122,10 @@ export class StoneAtlas {
       this.penY += this.shelfHeight
       this.shelfHeight = 0
     }
-    if (this.penY + px > this.canvas.height) this.grow()
+    if (this.penY + px > this.canvas.height) {
+      if (this.canvas.width < MAX_ATLAS_SIDE) this.grow()
+      else this.clear()
+    }
 
     const sprite: Sprite = { sx: this.penX, sy: this.penY, size: px, anchor: px / 2 }
     this.render(spec, radius, sprite)
@@ -125,20 +135,23 @@ export class StoneAtlas {
     return sprite
   }
 
+  /**
+   * Double the texture, keeping every sprite.
+   *
+   * The old bitmap is copied to the origin of the new one, so all existing slot
+   * coordinates stay valid and the pens carry on below the last shelf. Dropping the
+   * set here instead — which is what this used to do — cost a full re-bake of every
+   * on-screen stone, glow included, in the single frame after the growth: measured at
+   * 40-60 ms, and it landed roughly every ten frames of a zoom gesture, which is
+   * exactly when the atlas fills.
+   */
   private grow(): void {
     const next = this.create(this.canvas.width * 2, this.canvas.height * 2)
     const ctx = next.getContext('2d')
     if (!ctx) throw new Error('StoneAtlas: 2d context unavailable')
+    ctx.drawImage(this.canvas, 0, 0)
     this.canvas = next
     this.ctx = ctx
-    // Re-pack from scratch: the sprites are cheap and the alternative is a
-    // second blit path for the old texture.
-    const specs = [...this.slots.keys()]
-    this.slots.clear()
-    this.penX = 0
-    this.penY = 0
-    this.shelfHeight = 0
-    if (specs.length > 0) this.ctx.clearRect(0, 0, next.width, next.height)
   }
 
   private render(spec: StoneSpec, radius: number, sprite: Sprite): void {

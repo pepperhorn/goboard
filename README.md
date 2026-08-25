@@ -35,8 +35,9 @@ bumps a dirty flag that a single rAF loop reads. React only sees derived scalars
 ```bash
 pnpm install
 pnpm dev            # http://localhost:5173
-pnpm test           # 446 unit tests (vitest, headless)
+pnpm test           # 469 unit tests (vitest, headless)
 pnpm test:e2e       # 4 Playwright smoke flows
+pnpm bench          # the §5.3 frame-time benchmark
 pnpm build
 ```
 
@@ -52,8 +53,30 @@ src/audio/     scheduler (worker timer + lookahead), instrument pool, manifests
 src/io/        .go.json import/export, IndexedDB autosave, SMF type 1 export
 src/state/     the document store and the React chrome store
 src/ui/        React shell: transport, layer panel, inspector, velocity lane
+src/bench/     the §5.3 benchmark fixture and page (bench.html)
 e2e/           Playwright smoke flows
+bench/         the frame-time benchmark and its recorded numbers
 ```
+
+## Performance
+
+§5.3 asks for 60 fps pan and zoom with 5,000 notes in the viewport and 50,000 in the
+project, and insists the number be recorded rather than asserted in prose. `pnpm bench`
+drives the real board through a scripted pan and zoom at a pinned viewport and DPR;
+`bench/latest.json` holds the last run. On software-rendered headless Chromium:
+
+| phase              | notes in view | p50    | p95    | over 16.7 ms |
+|--------------------|---------------|--------|--------|--------------|
+| pan @ min zoom     | 4,974         | 1.1 ms | 2.2 ms | 0 / 180      |
+| pan @ default zoom | 818           | 0.6 ms | 1.6 ms | 0 / 120      |
+| zoom sweep         | 207           | 1.6 ms | 2.9 ms | 0 / 120      |
+
+The first version of that table read 24.4 ms / 29.0 ms / 180 of 180 frames over budget.
+Three things closed the gap, all of them §5.3 requirements that had not been
+implemented or had been implemented backwards: pan blits the previous frame and
+repaints only the exposed strip, the sprite atlas is rebuilt when the zoom *settles*
+rather than on every zoom frame, and the atlas keeps its sprites when its texture
+grows instead of re-baking every glow in the next frame.
 
 ## Notable implementation details
 

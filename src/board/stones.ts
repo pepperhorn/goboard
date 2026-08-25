@@ -6,7 +6,7 @@ import type { NoteIndex } from '../core/noteIndex'
 import { StoneAtlas, drawStone } from './atlas'
 import { noteRect } from './hitTest'
 import { isWhiteKey } from './theme'
-import { pitchToCenterY, quartersToWidth, visibleCols } from './viewport'
+import { pitchToCenterY, quartersToWidth, xToQuarters } from './viewport'
 import type { Size, Viewport } from './viewport'
 
 /**
@@ -56,17 +56,36 @@ export function mutedColor(hex: string): string {
   return `#${((r << 16) | (g << 8) | b).toString(16).padStart(6, '0')}`
 }
 
+/**
+ * A sub-rectangle of the surface to draw, in CSS pixels. The §5.3 self-blit repaints
+ * only the strip a pan exposed, and the cull has to narrow with it — clipping alone
+ * would still walk all 5,000 stones and hand every one to the rasterizer.
+ */
+export type StoneRegion = {
+  readonly x: number
+  readonly y: number
+  readonly width: number
+  readonly height: number
+}
+
 export function drawStones(
   ctx: CanvasRenderingContext2D,
   vp: Viewport,
   size: Size,
   atlas: StoneAtlas,
   scene: StoneContext,
+  region?: StoneRegion,
 ): number {
+  const x0 = region ? region.x : 0
+  const x1 = region ? region.x + region.width : size.width
+  const y0 = region ? region.y : 0
+  const y1 = region ? region.y + region.height : size.height
+
   // Widen the cull by the longest duration, not by one column: a note whose onset
-  // is left of the viewport can still have a lozenge inside it (§4.1, §5.3).
+  // is left of the region can still have a lozenge inside it (§4.1, §5.3).
   const margin = Math.ceil(scene.maxDurQuarters)
-  const { start, end } = visibleCols(vp, size, margin)
+  const start = Math.floor(xToQuarters(vp, x0)) - margin
+  const end = Math.ceil(xToQuarters(vp, x1))
   let drawn = 0
 
   for (const layer of scene.layers) {
@@ -79,16 +98,20 @@ export function drawStones(
       const sd = scene.subdivFor(layer.id, note.pos.col)
       const slotW = slotWidthFor(vp, sd, note)
       const rect = noteRect(vp, note, slotW)
-      if (rect.x > size.width || rect.x + rect.width < 0) continue
+      if (rect.x > x1 || rect.x + rect.width < x0) continue
 
       const radius = rect.height / 2
+      const cy = pitchToCenterY(vp, note.pitch)
+      // Vertical cull: `queryRange` is keyed by column, so without this every note in
+      // a visible column is rasterized even when its row is far off screen.
+      if (cy + radius < y0 || cy - radius > y1) continue
       const color = isOffGrid(sd, note) ? mutedColor(layer.color) : layer.color
       drawStone(
         ctx,
         atlas,
         { white: kit ? false : isWhiteKey(note.pitch), color, radius, active },
         rect.x + radius,
-        pitchToCenterY(vp, note.pitch),
+        cy,
         rect.width,
       )
       drawn++
