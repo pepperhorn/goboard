@@ -64,10 +64,17 @@ function layers(): Layer[] {
     colVel: new Map<number, number>(),
     // A finer grid over one column on every layer, so the §5.2 gridline pass is
     // exercised and its two guards (pxPerQuarter < 48, slot width < 4 px) actually
-    // get hit.
+    // get hit. The middle column is three regions, not one: 1/6, 1/3, 1/6, bracketing
+    // a coarser middle third — the region-model equivalent of the old fixture's
+    // non-uniform `{split:3, children:[{split:2}, null, {split:2}]}` column (mixed
+    // 1/6- and 1/3-wide slots in one column). That shape forces the grid cursor to
+    // cross a region boundary mid-column rather than only at column starts, which is
+    // exactly the stepping path a `slotAt`-in-the-draw-loop regression would skip.
     grid: [
       { start: canonicalize(order * 3, frac(0)), value: frac(1, 4) },
       { start: canonicalize(order * 3 + 1, frac(0)), value: frac(1, 6) },
+      { start: canonicalize(order * 3 + 1, frac(1, 3)), value: frac(1, 3) },
+      { start: canonicalize(order * 3 + 1, frac(2, 3)), value: frac(1, 6) },
       { start: canonicalize(order * 3 + 2, frac(0)), value: frac(1) },
     ],
     order,

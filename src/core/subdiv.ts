@@ -1,8 +1,12 @@
-import type { Frac, Slot, Subdiv, SubdivL2 } from './types'
+import type { Slot, Subdiv, SubdivL2 } from './types'
 import { frac } from './frac'
-import { floorDivMod } from './pos'
 
 /**
+ * v1 import only; the live model is `core/grid.ts`. This module survives solely so the
+ * v1 `.go.json` reader (`io/project.ts`) and its migration (`io/gridMigrate.ts`) can
+ * parse and enumerate the old per-column subdivision tree before converting it to
+ * regions. Nothing in the live draw/edit path calls into this file.
+ *
  * Subdivision trees and slot enumeration. See go-spec.md §3.2.
  *
  * A column's grid is a depth-2 tree, per column per layer. Slot boundaries within one
@@ -48,57 +52,6 @@ export function enumerateSlots(sd: Subdiv | undefined): Slot[] {
     }
   }
   return slots
-}
-
-/** Slot count without materializing the array. */
-export function slotCount(sd: Subdiv | undefined): number {
-  const split = sd?.split ?? DEFAULT_SPLIT
-  const children = sd?.children
-  if (children === undefined) return split
-  let count = 0
-  for (let i = 0; i < split; i++) count += children[i]?.split ?? 1
-  return count
-}
-
-/**
- * The slot containing offset `f`, plus its index, or `undefined` when `f` is outside
- * `[0, 1)`. Spans are half-open, so a boundary belongs to the slot it starts.
- */
-function locate(sd: Subdiv | undefined, f: Frac): { index: number; slot: Slot } | undefined {
-  if (f.n < 0 || f.n >= f.d) return undefined // `f` is normalized, so `d > 0`
-  const split = sd?.split ?? DEFAULT_SPLIT
-  // floor(f*s) and the leftover, in one floored div-mod. `f.n < f.d <= LATTICE` and
-  // `s <= 16`, so `f.n * s` stays well inside 2^53.
-  const { q: i, r } = floorDivMod(f.n * split, f.d)
-  const children = sd?.children
-  // Slots before slot i: 1 per leaf, `split` per subdivided slot.
-  let index = i
-  if (children !== undefined) {
-    index = 0
-    for (let k = 0; k < i; k++) index += children[k]?.split ?? 1
-  }
-  const child = children?.[i] ?? null
-  if (child === null) return { index, slot: { start: frac(i, split), dur: frac(1, split) } }
-  // `r / f.d` is the offset into slot i scaled to [0,1), so floor(r*t/f.d) is the sub-slot.
-  const t = child.split
-  const { q: j } = floorDivMod(r * t, f.d)
-  return {
-    index: index + j,
-    slot: { start: frac(i * t + j, split * t), dur: frac(1, split * t) },
-  }
-}
-
-/**
- * Index of the slot containing offset `f` (`0 <= f < 1`), or -1 if out of range.
- * Used by hit-testing and the velocity lane.
- */
-export function slotIndexAt(sd: Subdiv | undefined, f: Frac): number {
-  return locate(sd, f)?.index ?? -1
-}
-
-/** The slot containing offset `f`, or `undefined` if `f` is outside `[0, 1)`. */
-export function slotAt(sd: Subdiv | undefined, f: Frac): Slot | undefined {
-  return locate(sd, f)?.slot
 }
 
 /** `split` must be an integer in 1..16 — at either level. */

@@ -1,5 +1,4 @@
-import type { Frac, Subdiv } from '../core/types'
-import { slotCount } from '../core/subdiv'
+import type { Frac } from '../core/types'
 import { isZero as fracIsZero, mul as fracMul, toNumber as fracToNumber, frac } from '../core/frac'
 import type { GridRegion } from '../core/grid'
 import { DEFAULT_GRID_VALUE, slotStartsIn } from '../core/grid'
@@ -133,7 +132,3 @@ export function drawGridlines(
   ctx.strokeStyle = theme.gridLineSub
   ctx.stroke(sub)
 }
-
-/** Worst-case line count for a column, used by the perf benchmark. */
-export const gridLinesForColumn = (sd: Subdiv | undefined): number =>
-  sd ? slotCount(sd) - 1 : 0
