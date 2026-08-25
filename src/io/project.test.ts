@@ -771,6 +771,30 @@ describe('meterMap persistence', () => {
     expect(projectToBlobString(a)).toBe(projectToBlobString(b))
   })
 
+  it('throws at write time rather than writing a file it cannot reopen', () => {
+    // A meter that never passed through `readMeterMap` — built in-app, or handed to
+    // `serializeProject` directly — must fail loudly here, mirroring the `writeGrid`
+    // precedent above (`'throws at write time rather than writing a file it cannot
+    // reopen'`): autosave never reads its own bytes back, so an invalid meter must be
+    // caught on the way out, not discovered on the next reload.
+    const p = createEmptyProject()
+
+    const tripletBeatUnit: Project = {
+      ...p,
+      meterMap: [{ pos: pos(0), beatUnit: frac(1, 3), groups: [4] }],
+    }
+    expect(() => serializeProject(tripletBeatUnit)).toThrow(/meterMap\[0\]\.beatUnit/)
+
+    const outOfOrder: Project = {
+      ...p,
+      meterMap: [
+        { pos: pos(4), beatUnit: frac(1), groups: [4] },
+        { pos: pos(2), beatUnit: frac(1), groups: [4] },
+      ],
+    }
+    expect(() => serializeProject(outOfOrder)).toThrow(/meterMap.*not sorted into canonical order/)
+  })
+
   it('rejects a meter whose beatUnit is not a power-of-two fraction of a quarter, naming the path', () => {
     const bad = JSON.parse(projectToBlobString(createEmptyProject())) as Record<string, unknown>
     bad.meterMap = [{ pos: { col: 0, frac: { n: 0, d: 1 } }, beatUnit: { n: 1, d: 3 }, groups: [4] }]

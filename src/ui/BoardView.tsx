@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef } from 'react'
 import type { Layer, LayerId, Note, NoteId } from '../core/types'
 import { toNumber } from '../core/frac'
+import type { Meter } from '../core/meter'
 import { buildMeterMap } from '../core/meter'
 import { toQuarters } from '../core/pos'
 import { StoneAtlas } from '../board/atlas'
@@ -123,6 +124,15 @@ export function BoardView(props: BoardViewProps): React.ReactElement {
     let drawnVp: Viewport | null = null
     let drawnCommit = -1
 
+    /**
+     * `meterMap` only changes when a command commits (§3.7 events live in the
+     * project, mutated only through `BoardStore`), so it is normalised once per
+     * commit rather than once per frame — reusing the same `board.commitVersion`
+     * seam `drawnCommit` below gates other per-frame work with.
+     */
+    let meterMapCommit = -1
+    let meterMapCache: readonly Meter[] = buildMeterMap(board.getProject().meterMap)
+
     const interaction = new BoardInteraction({
       board,
       size: () => main.size,
@@ -146,9 +156,15 @@ export function BoardView(props: BoardViewProps): React.ReactElement {
       const vp = board.getViewport()
       const project = board.getProject()
       const active = board.activeLayer()
-      // Normalised once per frame: `buildMeterMap` establishes the anchoring
-      // invariant `barLinesIn` / `groupLinesIn` / `barNumberAt` require (§3.7).
-      const meterMap = buildMeterMap(project.meterMap)
+      // Recomputed only when a commit changed the project — `buildMeterMap`
+      // establishes the anchoring invariant `barLinesIn` / `groupLinesIn` /
+      // `barNumberAt` require (§3.7), but `meterMap` itself only ever changes on a
+      // commit, so redoing this on every one of 60 frames/second would be pure waste.
+      if (meterMapCommit !== board.commitVersion) {
+        meterMapCache = buildMeterMap(project.meterMap)
+        meterMapCommit = board.commitVersion
+      }
+      const meterMap = meterMapCache
 
       /*
        * §5.3: radius buckets shift with zoom, so the atlas is rebuilt "on zoom-end" —
