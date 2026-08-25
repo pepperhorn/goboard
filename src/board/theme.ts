@@ -22,6 +22,12 @@ export const theme = {
   loopFill: 'rgba(196, 122, 42, 0.18)',
   loopEdge: 'rgba(196, 122, 42, 0.75)',
 
+  /** Meter marker chips in the ruler's top band (§7.2). */
+  meterChipBg: 'rgba(122, 75, 134, 0.85)',
+  meterChipDragging: '#c2410c',
+  meterChipEdge: 'rgba(60, 50, 39, 0.35)',
+  meterChipText: '#fdf6ec',
+
   playhead: '#c2410c',
   hoverGhost: 'rgba(90, 74, 52, 0.22)',
 

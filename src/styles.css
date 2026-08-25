@@ -220,6 +220,86 @@ button, input, select {
   color: #a3341f;
 }
 
+/* --- meter section of the grid editor (§7.2, design §3.7) --- */
+
+.meter-menu {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--edge-soft);
+}
+
+.meter-menu__presets {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 3px;
+}
+
+.meter-chip {
+  padding: 4px 2px;
+  border: 1px solid var(--edge-soft);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.4);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.meter-chip:hover { background: rgba(255, 255, 255, 0.8); }
+
+.meter-menu__custom {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.meter-menu__input {
+  width: 2.6em;
+  min-width: 0;
+  padding: 2px 4px;
+  border: 1px solid var(--edge-soft);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.5);
+  font-size: 11px;
+  text-align: center;
+}
+
+.meter-menu__input--groups {
+  width: 4.4em;
+  margin-left: 4px;
+}
+
+.meter-menu__apply {
+  margin-left: auto;
+  padding: 3px 10px;
+  border: 1px solid var(--edge-soft);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.4);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.meter-menu__apply:hover { background: rgba(255, 255, 255, 0.8); }
+
+.meter-menu__error {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: #a3341f;
+}
+
+.meter-menu__remove {
+  margin-top: 6px;
+  width: 100%;
+  padding: 3px 10px;
+  border: 1px solid var(--edge-soft);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.4);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.meter-menu__remove:hover { background: rgba(255, 255, 255, 0.8); }
+
 .grid-menu__note {
   margin-top: 10px;
   font-size: 11px;

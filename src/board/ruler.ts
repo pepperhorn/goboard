@@ -2,6 +2,9 @@ import type { Pos } from '../core/types'
 import type { Meter } from '../core/meter'
 import { barNumberAt } from '../core/meter'
 import { pos, toQuarters } from '../core/pos'
+import {
+  MARKER_BAND_HEIGHT, markerCenterX, markerLabel, markerWidth,
+} from './meterMarkers'
 import { theme } from './theme'
 import { quartersToX, visibleCols, xToQuarters } from './viewport'
 import type { Size, Viewport } from './viewport'
@@ -19,6 +22,52 @@ export const RULER_HEIGHT = 28
 export type RulerState = {
   readonly loop?: { readonly start: Pos; readonly end: Pos } | undefined
   readonly playheadQuarters?: number | undefined
+  /**
+   * A meter marker being dragged: it is drawn at `quarters` instead of at its own
+   * position, so the chip follows the pointer before the move is committed. The map
+   * itself is untouched until pointerup, which is what keeps a drag one command (§7.3).
+   */
+  readonly meterDrag?: { readonly index: number; readonly quarters: number } | undefined
+}
+
+/**
+ * The meter markers, in the top `MARKER_BAND_HEIGHT` pixels (§7.2, design §3.7).
+ *
+ * Drawn after the column numbers and before the playhead: a marker should sit over the
+ * bar numbering it explains, but never hide the playhead handle.
+ */
+function drawMeterMarkers(
+  ctx: CanvasRenderingContext2D,
+  vp: Viewport,
+  size: Size,
+  meterMap: readonly Meter[],
+  drag: RulerState['meterDrag'],
+): void {
+  const top = 1
+  const height = MARKER_BAND_HEIGHT - 2
+  ctx.font = '600 9px Poppins, sans-serif'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.lineWidth = 1
+
+  for (let i = 0; i < meterMap.length; i++) {
+    const m = meterMap[i]!
+    const label = markerLabel(m)
+    const width = markerWidth(label)
+    const dragging = drag !== undefined && drag.index === i
+    const cx = dragging ? quartersToX(vp, drag.quarters) : markerCenterX(vp, m)
+    if (cx + width < 0 || cx - width > size.width) continue
+
+    const left = Math.round(cx - width / 2)
+    ctx.fillStyle = dragging ? theme.meterChipDragging : theme.meterChipBg
+    ctx.beginPath()
+    ctx.rect(left, top, width, height)
+    ctx.fill()
+    ctx.strokeStyle = theme.meterChipEdge
+    ctx.stroke()
+    ctx.fillStyle = theme.meterChipText
+    ctx.fillText(label, left + width / 2, top + height / 2)
+  }
 }
 
 /** Column-number label interval that keeps labels from colliding as you zoom out. */
@@ -79,6 +128,8 @@ export function drawRuler(
   ctx.lineTo(size.width, h - 0.5)
   ctx.strokeStyle = theme.gutterEdge
   ctx.stroke()
+
+  drawMeterMarkers(ctx, vp, size, meterMap, state.meterDrag)
 
   if (state.playheadQuarters !== undefined) {
     const x = quartersToX(vp, state.playheadQuarters)

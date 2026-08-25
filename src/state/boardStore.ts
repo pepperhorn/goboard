@@ -5,7 +5,10 @@ import type { Command } from '../core/command'
 import { NoteIndex } from '../core/noteIndex'
 import { buildTempoMap } from '../core/tempo'
 import type { TempoMap } from '../core/tempo'
-import { eq as posEq } from '../core/pos'
+import { LATTICE } from '../core/frac'
+import type { Meter } from '../core/meter'
+import { buildMeterMap, validateMeter } from '../core/meter'
+import { ORIGIN, cmp as posCmp, eq as posEq } from '../core/pos'
 import type { GridRegion, GridSlot } from '../core/grid'
 import { setGridRange as computeGridRange, slotAt as slotAtGrid } from '../core/grid'
 import { initialViewport } from '../board/viewport'
@@ -32,6 +35,18 @@ export class BoardStore {
   private project: Project
   private index: NoteIndex
   private tempo: TempoMap
+  /**
+   * The **built** meter map — `buildMeterMap(project.meterMap)`, kept beside the
+   * project the way `tempo` is.
+   *
+   * Two reasons it lives here rather than being rebuilt by each reader. It is the
+   * only form with the anchoring invariant `barLinesIn` / `groupLinesIn` /
+   * `barNumberAt` require, so a reader that forgot to build would throw from a draw
+   * path (`assertAnchored`). And it is the form the UI indexes into: a marker the user
+   * grabs is `meter[i]`, so `moveMeter` / `removeMeter` must mean the same `i`.
+   * Rebuilding per reader would let a prepended default shift the indices apart.
+   */
+  private meter: readonly Meter[]
   private viewport: Viewport
   private readonly listeners = new Set<BoardListener>()
 
@@ -44,6 +59,7 @@ export class BoardStore {
     this.project = project
     this.index = NoteIndex.build(project.notes)
     this.tempo = buildTempoMap(project.tempoMap)
+    this.meter = buildMeterMap(project.meterMap)
     this.viewport = initialViewport(size)
     this.commands = new CommandStack({
       onCommit: () => {
@@ -78,6 +94,14 @@ export class BoardStore {
 
   getTempoMap(): TempoMap {
     return this.tempo
+  }
+
+  /**
+   * The built meter map (§3.7). Safe to hand straight to `barLinesIn`, `groupLinesIn`
+   * and `barNumberAt`, and the list marker indices refer to.
+   */
+  getMeterMap(): readonly Meter[] {
+    return this.meter
   }
 
   getViewport(): Viewport {
@@ -326,6 +350,99 @@ export class BoardStore {
     this.run({ label: 'Column velocity', do: () => swap(next), undo: () => swap(prev) })
   }
 
+  // --- meter (§3.7), every edit a command ---
+
+  /*
+   * Why all three of these go through `run` rather than assigning `project.meterMap`
+   * directly: `BoardView` caches the map against `commitVersion`, which only moves in
+   * the command stack's `onCommit`. A mutation outside a command would leave the board
+   * drawing last commit's bar lines until something unrelated committed. It is also
+   * the §7.3 rule — one undoable command per gesture — and a meter change that could
+   * not be undone would be the only edit on the ruler that could not.
+   */
+
+  /** Both maps at once, so `project.meterMap` and `this.meter` can never disagree. */
+  private swapMeter(next: readonly Meter[]): void {
+    this.project = { ...this.project, meterMap: next }
+    this.meter = next
+    this.touch()
+  }
+
+  /** The map with `m` inserted, replacing any meter already at the same position. */
+  private meterMapWith(m: Meter): readonly Meter[] {
+    const kept = this.meter.filter((x) => !posEq(x.pos, m.pos))
+    return buildMeterMap([...kept, m].sort((a, b) => posCmp(a.pos, b.pos)))
+  }
+
+  /**
+   * Add a meter change, or replace the one already at that position.
+   *
+   * Throws a `RangeError` naming the failing field for anything `validateMeter` would
+   * reject — a triplet `beatUnit`, an empty or non-integer `groups` — so the grid menu
+   * can report it the way it reports an off-lattice tuplet, rather than letting an
+   * unrenderable meter into the project. `validateMeter` guards the SMF
+   * power-of-two rule; the lattice check below is the §3.1 half it does not cover,
+   * and this is the only door a meter enters the project through.
+   */
+  setMeter(meter: Meter): void {
+    const m = validateMeter(meter, 'meter')
+    if (LATTICE % m.beatUnit.d !== 0) {
+      throw new RangeError(
+        `meter.beatUnit: denominator ${m.beatUnit.d} is not on the §3.1 lattice`,
+      )
+    }
+    const prev = this.meter
+    const next = this.meterMapWith(m)
+    this.run({
+      label: 'Set meter',
+      do: () => this.swapMeter(next),
+      undo: () => this.swapMeter(prev),
+    })
+  }
+
+  /**
+   * Move meter `index` to `to`. One command for the whole drag (§7.3).
+   *
+   * **Index 0 is refused.** `buildMeterMap` guarantees `map[0].pos` is at or before
+   * the origin, and every function in `meter.ts`'s bar arithmetic asserts it
+   * (`assertAnchored`). Moving the first meter off the origin would therefore not
+   * misdraw the board, it would throw a `RangeError` out of `barLinesIn` on the very
+   * next frame. For the same reason a move onto or before the origin is refused: that
+   * position belongs to the anchor, and letting another meter land there would delete
+   * it. A move onto a position another meter already occupies is refused too — merging
+   * two meters is not what a drag looks like it does.
+   */
+  moveMeter(index: number, to: Pos): void {
+    const prev = this.meter
+    const m = prev[index]
+    if (index <= 0 || m === undefined) return
+    if (posCmp(to, ORIGIN) <= 0) return
+    if (posEq(m.pos, to)) return
+    if (prev.some((x, i) => i !== index && posEq(x.pos, to))) return
+
+    const moved: Meter = { ...m, pos: to }
+    const next = buildMeterMap(
+      [...prev.filter((_, i) => i !== index), moved].sort((a, b) => posCmp(a.pos, b.pos)),
+    )
+    this.run({
+      label: 'Move meter',
+      do: () => this.swapMeter(next),
+      undo: () => this.swapMeter(prev),
+    })
+  }
+
+  /** Delete meter `index`. Index 0 is refused — see `moveMeter` for why. */
+  removeMeter(index: number): void {
+    const prev = this.meter
+    if (index <= 0 || index >= prev.length) return
+    const next = buildMeterMap(prev.filter((_, i) => i !== index))
+    this.run({
+      label: 'Remove meter',
+      do: () => this.swapMeter(next),
+      undo: () => this.swapMeter(prev),
+    })
+  }
+
   // --- transport-adjacent project state ---
 
   setLoop(loop: { start: Pos; end: Pos } | undefined): void {
@@ -369,6 +486,7 @@ export class BoardStore {
     this.project = project
     this.index = NoteIndex.build(project.notes)
     this.tempo = buildTempoMap(project.tempoMap)
+    this.meter = buildMeterMap(project.meterMap)
     this.commands.clear()
     this.commitVersion++
     this.touch()

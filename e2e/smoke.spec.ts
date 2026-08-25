@@ -147,3 +147,88 @@ test('the grid menu applies a preset and reports an off-lattice tuplet (§7.2)',
   await openMenu()
   await expect(page.locator('.grid-menu__label').first()).toContainText('16th')
 })
+
+/*
+ * Meter markers (§7.2, design §3.7). Also `.tsx`-and-pointer territory the headless
+ * suite cannot reach: `markerAt` is unit-tested, but "the band wins at the top and
+ * nothing changed below it" is a claim about two event handlers on a real canvas.
+ *
+ * The undo button doubles as the assertion surface — it shows the label of the last
+ * committed command, so "Set loop" then "Move meter" then "Remove meter" is direct
+ * evidence that each gesture landed on the intended handler and committed once.
+ */
+test('meter markers own the ruler top band, and seek/loop still own the rest (§7.2)', async ({ page }) => {
+  await page.goto('/')
+
+  const ruler = page.locator('.board-ruler')
+  /*
+   * Re-measured before every gesture on purpose. The transport bar changes height as
+   * the instrument manifests land, which moves the whole board down mid-test — a box
+   * captured once at `goto` sends the later clicks into the chrome above the ruler.
+   */
+  const rulerBox = async () => {
+    const box = await ruler.boundingBox()
+    if (!box) throw new Error('ruler canvas has no box')
+    return box
+  }
+  // 96 px/quarter is the initial zoom (§5.1), so column n sits at 96n from the left.
+  const COL = 96
+  const BELOW = 20 // comfortably under MARKER_BAND_HEIGHT (12)
+  const BAND = 5
+  const undoLabel = page.locator('.btn-undo__label')
+
+  // --- below the band: a drag still sets the loop, exactly as before markers existed
+  let box = await rulerBox()
+  await page.mouse.move(box.x + 2 * COL, box.y + BELOW)
+  await page.mouse.down()
+  await page.mouse.move(box.x + 4 * COL, box.y + BELOW, { steps: 8 })
+  await page.mouse.up()
+  await expect(page.locator('.btn-loop')).toHaveClass(/is-on/)
+  await expect(undoLabel).toHaveText('Set loop')
+
+  // --- below the band: a plain click seeks, and seeking commits nothing
+  box = await rulerBox()
+  await page.mouse.click(box.x + 6 * COL, box.y + BELOW)
+  await expect(undoLabel).toHaveText('Set loop')
+
+  // --- below the band: right-click still opens the grid editor, which now also
+  // carries the meter section a new meter is dropped from. The column is kept near
+  // the left edge because the menu is a fixed panel anchored at the click, and a
+  // click far to the right would open it off the side of the viewport.
+  box = await rulerBox()
+  await page.mouse.click(box.x + 2 * COL, box.y + BELOW, { button: 'right' })
+  const menu = page.locator('.grid-menu')
+  await expect(menu).toBeVisible()
+
+  // An unreachable beat unit reports rather than throwing into React, the way an
+  // off-lattice tuplet does — 4/3 is not a power-of-two SMF denominator.
+  await menu.locator('.meter-menu__input').nth(1).fill('3')
+  await menu.locator('.meter-menu__apply').click()
+  await expect(menu.locator('.meter-menu__error')).toContainText('power of two')
+  await expect(menu).toBeVisible()
+
+  await menu.locator('.meter-chip', { hasText: /^7\/8$/ }).click()
+  await expect(page.locator('.grid-menu')).toHaveCount(0)
+  await expect(undoLabel).toHaveText('Set meter')
+
+  // --- in the band: the chip drags, and the drop is one command
+  box = await rulerBox()
+  await page.mouse.move(box.x + 2 * COL, box.y + BAND)
+  await page.mouse.down()
+  await page.mouse.move(box.x + 8 * COL + 6, box.y + BAND, { steps: 8 })
+  await page.mouse.up()
+  await expect(undoLabel).toHaveText('Move meter')
+
+  // The drop snapped to the 4/4 bar line at column 8 — not to the quarter under the
+  // pointer — so the chip is there now, and a right-click on it removes the meter.
+  box = await rulerBox()
+  await page.mouse.click(box.x + 8 * COL, box.y + BAND, { button: 'right' })
+  await expect(undoLabel).toHaveText('Remove meter')
+
+  // The anchor meter at column 0 is refused both ways: right-clicking it opens the
+  // grid editor instead of deleting it, and undo still shows the previous command.
+  box = await rulerBox()
+  await page.mouse.click(box.x + 2, box.y + BAND, { button: 'right' })
+  await expect(page.locator('.grid-menu')).toBeVisible()
+  await expect(undoLabel).toHaveText('Remove meter')
+})

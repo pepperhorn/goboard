@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react'
 import type { Layer, LayerId, Note, NoteId } from '../core/types'
 import { toNumber } from '../core/frac'
-import type { Meter } from '../core/meter'
 import { buildMeterMap } from '../core/meter'
 import { toQuarters } from '../core/pos'
 import { StoneAtlas } from '../board/atlas'
@@ -11,6 +10,7 @@ import type { Surface } from '../board/canvasHost'
 import { drawGridlines, drawRows } from '../board/grid'
 import { GUTTER_WIDTH, drawGutter } from '../board/gutter'
 import { BoardInteraction } from '../board/interaction'
+import { markerAt, markerCenterX, quantizeMeterDrop } from '../board/meterMarkers'
 import { RULER_HEIGHT, drawRuler } from '../board/ruler'
 import { drawStones } from '../board/stones'
 import type { StoneRegion } from '../board/stones'
@@ -125,13 +125,11 @@ export function BoardView(props: BoardViewProps): React.ReactElement {
     let drawnCommit = -1
 
     /**
-     * `meterMap` only changes when a command commits (§3.7 events live in the
-     * project, mutated only through `BoardStore`), so it is normalised once per
-     * commit rather than once per frame — reusing the same `board.commitVersion`
-     * seam `drawnCommit` below gates other per-frame work with.
+     * The meter marker being dragged, or `null`. Declared up here rather than beside
+     * the ruler handlers because `frame` reads it, and `frame` runs from the rAF loop
+     * that starts before those handlers are installed.
      */
-    let meterMapCommit = -1
-    let meterMapCache: readonly Meter[] = buildMeterMap(board.getProject().meterMap)
+    let markerDrag: { index: number; grabDx: number; quarters: number } | null = null
 
     const interaction = new BoardInteraction({
       board,
@@ -156,15 +154,10 @@ export function BoardView(props: BoardViewProps): React.ReactElement {
       const vp = board.getViewport()
       const project = board.getProject()
       const active = board.activeLayer()
-      // Recomputed only when a commit changed the project — `buildMeterMap`
-      // establishes the anchoring invariant `barLinesIn` / `groupLinesIn` /
-      // `barNumberAt` require (§3.7), but `meterMap` itself only ever changes on a
-      // commit, so redoing this on every one of 60 frames/second would be pure waste.
-      if (meterMapCommit !== board.commitVersion) {
-        meterMapCache = buildMeterMap(project.meterMap)
-        meterMapCommit = board.commitVersion
-      }
-      const meterMap = meterMapCache
+      // Already built, and rebuilt only when a meter command commits (§3.7): the store
+      // owns it so that the map this frame draws and the map a marker index refers to
+      // are the same list.
+      const meterMap = board.getMeterMap()
 
       /*
        * §5.3: radius buckets shift with zoom, so the atlas is rebuilt "on zoom-end" —
@@ -266,6 +259,9 @@ export function BoardView(props: BoardViewProps): React.ReactElement {
       drawRuler(ruler.ctx, boardVp, ruler.size, meterMap, {
         loop: project.loop,
         playheadQuarters: playhead ?? undefined,
+        meterDrag: markerDrag
+          ? { index: markerDrag.index, quarters: markerDrag.quarters }
+          : undefined,
       })
 
       // Overlay: playhead line and hover ghost only.
@@ -353,13 +349,47 @@ export function BoardView(props: BoardViewProps): React.ReactElement {
     boardCanvas.addEventListener('wheel', onWheel, { passive: false })
     boardCanvas.addEventListener('contextmenu', onContext)
 
-    // Ruler: click seeks, drag sets the loop, shift-click clears, right-click
-    // opens the grid editor (§7.2).
+    /*
+     * Ruler: click seeks, drag sets the loop, shift-click clears, right-click opens
+     * the grid editor (§7.2) — and, from Task 13, the top `MARKER_BAND_HEIGHT` pixels
+     * belong to the meter markers.
+     *
+     * Hit priority is the whole design here. `markerAt` is tested FIRST and returns
+     * `null` for every y at or below the band, so the four gestures above reach
+     * exactly the code they always did, by the same path, for the whole of the ruler
+     * except a 12px strip at the top.
+     */
     let loopAnchor: number | null = null
     const onRulerDown = (e: PointerEvent) => {
-      const { x } = local(rulerCanvas, e)
+      const { x, y } = local(rulerCanvas, e)
       const vp = board.getViewport()
       const q = xToQuarters(vp, x)
+
+      const hit = markerAt(vp, board.getMeterMap(), x, y)
+      if (hit !== null) {
+        e.preventDefault()
+        if (e.button === 2) {
+          // Index 0 anchors the map at or before the origin, so it cannot be removed
+          // (`BoardStore.removeMeter` refuses it). Opening the grid editor instead
+          // keeps the opening time signature editable rather than leaving a dead chip.
+          if (hit === 0) propsRef.current.onGridMenu(Math.floor(q), e.clientX, e.clientY)
+          else board.removeMeter(hit)
+          return
+        }
+        if (e.button !== 0) return
+        if (hit === 0) return // the anchor meter never moves — see `moveMeter`
+        rulerCanvas.setPointerCapture(e.pointerId)
+        const m = board.getMeterMap()[hit]!
+        // The grab offset keeps the chip from jumping to the pointer on the first move.
+        markerDrag = {
+          index: hit,
+          grabDx: x - markerCenterX(vp, m),
+          quarters: toQuarters(m.pos),
+        }
+        board.touch()
+        return
+      }
+
       if (e.button === 2) {
         e.preventDefault()
         propsRef.current.onGridMenu(Math.floor(q), e.clientX, e.clientY)
@@ -375,6 +405,13 @@ export function BoardView(props: BoardViewProps): React.ReactElement {
       loopAnchor = q
     }
     const onRulerMove = (e: PointerEvent) => {
+      if (markerDrag !== null) {
+        const { x } = local(rulerCanvas, e)
+        const at = xToQuarters(board.getViewport(), x - markerDrag.grabDx)
+        markerDrag = { ...markerDrag, quarters: at }
+        board.touch()
+        return
+      }
       if (loopAnchor === null) return
       const { x } = local(rulerCanvas, e)
       const q = xToQuarters(board.getViewport(), x)
@@ -386,6 +423,16 @@ export function BoardView(props: BoardViewProps): React.ReactElement {
     }
     const onRulerUp = (e: PointerEvent) => {
       if (rulerCanvas.hasPointerCapture(e.pointerId)) rulerCanvas.releasePointerCapture(e.pointerId)
+      if (markerDrag !== null) {
+        const drag = markerDrag
+        markerDrag = null
+        // The landing is quantized against the map *without* the dragged meter, so the
+        // bar lines it snaps to are the ones the surrounding meter would have drawn.
+        const rest = buildMeterMap(board.getMeterMap().filter((_, i) => i !== drag.index))
+        board.moveMeter(drag.index, quantizeMeterDrop(rest, drag.quarters))
+        board.touch()
+        return
+      }
       if (loopAnchor === null) return
       const { x } = local(rulerCanvas, e)
       const q = xToQuarters(board.getViewport(), x)
@@ -395,9 +442,18 @@ export function BoardView(props: BoardViewProps): React.ReactElement {
       loopAnchor = null
     }
 
+    /** A cancelled gesture commits nothing — the chip snaps back where it was. */
+    const onRulerCancel = (e: PointerEvent) => {
+      if (rulerCanvas.hasPointerCapture(e.pointerId)) rulerCanvas.releasePointerCapture(e.pointerId)
+      markerDrag = null
+      loopAnchor = null
+      board.touch()
+    }
+
     rulerCanvas.addEventListener('pointerdown', onRulerDown)
     rulerCanvas.addEventListener('pointermove', onRulerMove)
     rulerCanvas.addEventListener('pointerup', onRulerUp)
+    rulerCanvas.addEventListener('pointercancel', onRulerCancel)
     rulerCanvas.addEventListener('contextmenu', onContext)
 
     return () => {
@@ -413,6 +469,7 @@ export function BoardView(props: BoardViewProps): React.ReactElement {
       rulerCanvas.removeEventListener('pointerdown', onRulerDown)
       rulerCanvas.removeEventListener('pointermove', onRulerMove)
       rulerCanvas.removeEventListener('pointerup', onRulerUp)
+      rulerCanvas.removeEventListener('pointercancel', onRulerCancel)
       rulerCanvas.removeEventListener('contextmenu', onContext)
       interactionRef.current = null
     }
