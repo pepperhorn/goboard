@@ -1,7 +1,10 @@
 import type { Frac, Layer, LayerId, Note, Pos, Project, Subdiv, TempoEvent } from '../core/types'
 import { isPositive, normalize } from '../core/frac'
-import { canonicalize, lt as plt, pos as mkPos } from '../core/pos'
+import { canonicalize, cmp as pcmp, lt as plt, pos as mkPos } from '../core/pos'
 import { validateSubdiv } from '../core/subdiv'
+import type { GridRegion } from '../core/grid'
+import { validateGridValue } from '../core/gridValue'
+import { subdivsToRegions } from './gridMigrate'
 import { buildTempoMap } from '../core/tempo'
 import { NoteIndex } from '../core/noteIndex'
 
@@ -38,8 +41,11 @@ import { NoteIndex } from '../core/noteIndex'
 /** Extension for exported project files (§10). */
 export const PROJECT_FILE_EXT = '.go.json'
 
-/** The only schema version in existence. Bumping it means writing a migration. */
-const VERSION = 1
+/** The current schema version. v1 files are read via a migration (§3.2 -> §3.8). */
+const VERSION = 2
+
+/** The oldest schema version this module still reads. */
+const MIN_READABLE_VERSION = 1
 
 /** MIDI 7-bit range, shared by `pitch`, `vel`, `defaultVel` and `colVel` values. */
 const MIDI_MAX = 127
@@ -65,12 +71,24 @@ function writePos(p: Pos): unknown {
   return { col: p.col, frac: writeFrac(p.frac) }
 }
 
-function writeSubdiv(sd: Subdiv): unknown {
-  if (sd.children === undefined) return { split: sd.split }
-  return {
-    split: sd.split,
-    children: sd.children.map((c) => (c === null ? null : { split: c.split })),
+function writeGridRegion(r: GridRegion): unknown {
+  return { start: writePos(r.start), value: writeFrac(r.value) }
+}
+
+/**
+ * A layer's `grid` is already canonical (§3.2): sorted by `start`, no duplicate
+ * starts. Writing therefore only asserts the invariant rather than re-sorting — a
+ * caller that hands in an unsorted list has a bug, and silently sorting it would
+ * both hide that bug and, because two different orderings would then serialize to
+ * the same bytes, make it impossible to tell them apart on the way back in.
+ */
+function writeGrid(regions: readonly GridRegion[], where: string): unknown[] {
+  for (let i = 1; i < regions.length; i++) {
+    if (pcmp(regions[i - 1]!.start, regions[i]!.start) >= 0) {
+      throw new Error(`Project: ${where} is not sorted into canonical order — this is a bug`)
+    }
   }
+  return regions.map(writeGridRegion)
 }
 
 /** A `Map` as column-sorted `[[col, value], ...]` — the §10 entry-array form. */
@@ -105,7 +123,7 @@ function writeLayer(l: Layer): unknown {
     visible: l.visible,
     defaultVel: l.defaultVel,
     colVel: writeMap(l.colVel, (v) => v),
-    subdivs: writeMap(l.subdivs, writeSubdiv),
+    grid: writeGrid(l.grid, `layer "${l.id}" grid`),
     order: l.order,
   }
 }
@@ -261,8 +279,34 @@ function readSubdiv(v: unknown, where: string): Subdiv {
   return guard(where, 'is not a valid subdivision', () => validateSubdiv(v))
 }
 
-function readLayer(v: unknown, where: string): Layer {
-  const o = requireObject(v, where)
+/**
+ * `[{start, value}, ...]` back into a `GridRegion[]` (§3.8).
+ *
+ * Regions must already be canonical on disk: sorted by `start`, with no two regions
+ * sharing a start. Both are rejected here rather than repaired, for the same reason
+ * `readPos` rejects a non-canonical position — silently reordering or dropping one
+ * would move the user's grid without telling them.
+ */
+function readGrid(v: unknown, where: string): GridRegion[] {
+  const raw = requireArray(v, where)
+  const out: GridRegion[] = []
+  for (let i = 0; i < raw.length; i++) {
+    const o = requireObject(raw[i], `${where}[${i}]`)
+    const start = readPos(o.start, `${where}[${i}].start`)
+    const value = validateGridValue(o.value, `${where}[${i}].value`)
+    const prev = out[out.length - 1]
+    if (prev !== undefined) {
+      const order = pcmp(prev.start, start)
+      if (order === 0) fail(`${where}[${i}].start`, 'duplicates the previous region\'s start')
+      if (order > 0) fail(`${where}[${i}].start`, 'is out of order relative to the previous region')
+    }
+    out.push({ start, value })
+  }
+  return out
+}
+
+/** Fields shared by every `.go.json` version. */
+function readLayerCommon(o: Record<string, unknown>, where: string) {
   return {
     id: requireString(o.id, `${where}.id`),
     name: requireString(o.name, `${where}.name`),
@@ -275,9 +319,21 @@ function readLayer(v: unknown, where: string): Layer {
     colVel: readMap(o.colVel, `${where}.colVel`, (raw, at) =>
       requireIntInRange(raw, at, 0, MIDI_MAX),
     ),
-    subdivs: readMap(o.subdivs, `${where}.subdivs`, readSubdiv),
     order: requireInt(o.order, `${where}.order`),
   }
+}
+
+/** v2 layer: `grid` is read directly. */
+function readLayerV2(v: unknown, where: string): Layer {
+  const o = requireObject(v, where)
+  return { ...readLayerCommon(o, where), grid: readGrid(o.grid, `${where}.grid`) }
+}
+
+/** v1 layer: `subdivs` is read the old way, then migrated to regions (§3.2 -> §3.8). */
+function readLayerV1(v: unknown, where: string): Layer {
+  const o = requireObject(v, where)
+  const subdivs = readMap(o.subdivs, `${where}.subdivs`, readSubdiv)
+  return { ...readLayerCommon(o, where), grid: subdivsToRegions(subdivs) }
 }
 
 function readNote(v: unknown, where: string, layerIds: ReadonlySet<LayerId>): Note {
@@ -311,10 +367,11 @@ function readTempoEvent(v: unknown, where: string): TempoEvent {
  */
 export function deserializeProject(raw: unknown): Project {
   const o = requireObject(raw, 'root')
-  if (o.version !== VERSION) {
+  if (o.version !== VERSION && o.version !== MIN_READABLE_VERSION) {
     const got = typeof o.version === 'number' ? o.version : describe(o.version)
-    fail('version', `must be ${VERSION}, got ${got}`)
+    fail('version', `must be ${MIN_READABLE_VERSION} or ${VERSION}, got ${got}`)
   }
+  const readLayer = o.version === MIN_READABLE_VERSION ? readLayerV1 : readLayerV2
   const name = requireString(o.name, 'name')
   const activeLayerId = requireString(o.activeLayerId, 'activeLayerId')
 
@@ -427,7 +484,7 @@ export function createEmptyProject(): Project {
       visible: true,
       defaultVel: INIT_VEL,
       colVel: new Map<number, number>(),
-      subdivs: new Map<number, Subdiv>(),
+      grid: [],
       order,
     })),
     notes: [],

@@ -27,7 +27,7 @@ function layer(over: Partial<Layer> = {}): Layer {
     visible: true,
     defaultVel: 96,
     colVel: new Map(),
-    subdivs: new Map(),
+    grid: [],
     order: 0,
     ...over,
   }
@@ -46,7 +46,7 @@ function note(over: Partial<Note> & Pick<Note, 'pos'>): Note {
 
 function project(over: Partial<Project> = {}): Project {
   return {
-    version: 1,
+    version: 2,
     name: 'Test',
     tempoMap: [{ pos: pos(0), bpm: 120 }],
     layers: [layer()],

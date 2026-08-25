@@ -41,10 +41,10 @@ describe('createBenchProject (§5.3)', () => {
     expect(() => NoteIndex.build(p.notes)).not.toThrow()
   })
 
-  it('uses several denominators and subdivided columns', () => {
+  it('uses several denominators and a subdivided grid', () => {
     const p = createBenchProject({ total: 400, perCol: 20, denseCols: 10 })
     expect(new Set(p.notes.map((n) => n.pos.frac.d)).size).toBeGreaterThan(3)
-    expect([...p.layers[0]!.subdivs.values()].length).toBeGreaterThan(0)
+    expect(p.layers[0]!.grid.length).toBeGreaterThan(0)
   })
 
   it('rejects a fixture with no head to draw', () => {

@@ -1,4 +1,4 @@
-import type { Layer, Note, Project, Subdiv } from '../core/types'
+import type { Layer, Note, Project } from '../core/types'
 import { frac } from '../core/frac'
 import { canonicalize } from '../core/pos'
 import { LAYER_COLORS } from '../board/theme'
@@ -62,12 +62,14 @@ function layers(): Layer[] {
     visible: true,
     defaultVel: 96,
     colVel: new Map<number, number>(),
-    // A subdivided column on every layer, so the §5.2 subdivision pass is exercised
-    // and its two guards (pxPerQuarter < 48, slot width < 4 px) actually get hit.
-    subdivs: new Map<number, Subdiv>([
-      [order * 3, { split: 4 }],
-      [order * 3 + 1, { split: 3, children: [{ split: 2 }, null, { split: 2 }] }],
-    ]),
+    // A finer grid over one column on every layer, so the §5.2 gridline pass is
+    // exercised and its two guards (pxPerQuarter < 48, slot width < 4 px) actually
+    // get hit.
+    grid: [
+      { start: canonicalize(order * 3, frac(0)), value: frac(1, 4) },
+      { start: canonicalize(order * 3 + 1, frac(0)), value: frac(1, 6) },
+      { start: canonicalize(order * 3 + 2, frac(0)), value: frac(1) },
+    ],
     order,
   }))
 }
@@ -114,7 +116,7 @@ export function createBenchProject(options: BenchFixtureOptions = {}): Project {
   for (let i = dense; i < total; i++) push(i, denseCols + (i % tailCols))
 
   return {
-    version: 1,
+    version: 2,
     name: `Bench ${total}`,
     tempoMap: [{ pos: canonicalize(0, frac(0)), bpm: 120 }],
     layers: project,

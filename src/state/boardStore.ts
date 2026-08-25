@@ -1,11 +1,13 @@
 import { nanoid } from 'nanoid'
-import type { Frac, Layer, LayerId, Note, NoteId, Pos, Project, Subdiv } from '../core/types'
+import type { Frac, Layer, LayerId, Note, NoteId, Pos, Project } from '../core/types'
 import { CommandStack } from '../core/command'
 import type { Command } from '../core/command'
 import { NoteIndex } from '../core/noteIndex'
 import { buildTempoMap } from '../core/tempo'
 import type { TempoMap } from '../core/tempo'
 import { eq as posEq } from '../core/pos'
+import type { GridRegion, GridSlot } from '../core/grid'
+import { setGridRange as computeGridRange, slotAt as slotAtGrid } from '../core/grid'
 import { initialViewport } from '../board/viewport'
 import type { Size, Viewport } from '../board/viewport'
 
@@ -100,8 +102,12 @@ export class BoardStore {
       a.id === active ? 1 : b.id === active ? -1 : a.order - b.order)
   }
 
-  subdivFor(layerId: LayerId, col: number): Subdiv | undefined {
-    return this.layer(layerId)?.subdivs.get(col)
+  gridFor(layerId: LayerId): readonly GridRegion[] {
+    return this.layer(layerId)?.grid ?? []
+  }
+
+  slotAt(layerId: LayerId, at: Pos): GridSlot {
+    return slotAtGrid(this.gridFor(layerId), at)
   }
 
   /** Longest duration on any visible layer — the §4.1 cull/hit widening. */
@@ -256,22 +262,20 @@ export class BoardStore {
     this.run({ label: 'Select layer', do: () => swap(id), undo: () => swap(prev) })
   }
 
-  /** Per-column subdivision for a layer. Re-quantizes nothing (§7). */
-  setSubdiv(layerId: LayerId, col: number, sd: Subdiv | undefined): void {
+  /** §7.3: one command, however many regions the edit touches. Re-quantizes nothing. */
+  setGridRange(layerId: LayerId, from: Pos, to: Pos | undefined, value: Frac): void {
     const l = this.layer(layerId)
     if (!l) return
-    const prev = l.subdivs.get(col)
-    const swap = (to: Subdiv | undefined) => {
-      const subdivs = new Map(l.subdivs)
-      if (to === undefined || to.split === 1) subdivs.delete(col)
-      else subdivs.set(col, to)
+    const prev = l.grid
+    const next = computeGridRange(prev, from, to, value)
+    const swap = (grid: readonly GridRegion[]) => {
       this.project = {
         ...this.project,
-        layers: this.project.layers.map((x) => (x.id === layerId ? { ...x, subdivs } : x)),
+        layers: this.project.layers.map((x) => (x.id === layerId ? { ...x, grid } : x)),
       }
       this.touch()
     }
-    this.run({ label: 'Subdivide column', do: () => swap(sd), undo: () => swap(prev) })
+    this.run({ label: 'Set grid', do: () => swap(next), undo: () => swap(prev) })
   }
 
   setColVel(layerId: LayerId, col: number, vel: number | undefined): void {
