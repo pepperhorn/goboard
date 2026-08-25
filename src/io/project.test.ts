@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { Layer, Note, Project, Subdiv } from '../core/types'
 import { frac } from '../core/frac'
 import { pos } from '../core/pos'
+import { DEFAULT_METER } from '../core/meter'
 import { enumerateSlots } from '../core/subdiv'
 import { slotStartsIn } from '../core/grid'
 import { BoardStore } from '../state/boardStore'
@@ -68,6 +69,7 @@ const FIXTURE: Project = {
     { id: 'n3', layerId: 'L2', pos: pos(-1, 3, 4), dur: frac(1, 4), pitch: 36, vel: 0 },
   ],
   activeLayerId: 'L1',
+  meterMap: [DEFAULT_METER],
   loop: { start: pos(-4), end: pos(8, 1, 2) },
 }
 

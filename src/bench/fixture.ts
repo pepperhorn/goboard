@@ -1,6 +1,7 @@
 import type { Layer, Note, Project } from '../core/types'
 import { frac } from '../core/frac'
 import { canonicalize } from '../core/pos'
+import { DEFAULT_METER } from '../core/meter'
 import { LAYER_COLORS } from '../board/theme'
 
 /**
@@ -129,6 +130,7 @@ export function createBenchProject(options: BenchFixtureOptions = {}): Project {
     layers: project,
     notes,
     activeLayerId: project[0]!.id,
+    meterMap: [DEFAULT_METER],
   }
 }
 

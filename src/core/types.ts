@@ -1,4 +1,5 @@
 import type { GridRegion } from './grid'
+import type { Meter } from './meter'
 
 /** Canonical time and project types. See go-spec.md §3–§4. */
 
@@ -68,5 +69,7 @@ export type Project = {
   readonly layers: readonly Layer[]
   readonly notes: readonly Note[]
   readonly activeLayerId: LayerId
+  /** Bar lines, bar numbers and MIDI time signatures: sorted by `pos`. See design §3.7. */
+  readonly meterMap: readonly Meter[]
   readonly loop?: { readonly start: Pos; readonly end: Pos }
 }

@@ -2,6 +2,7 @@ import type { Frac, Layer, LayerId, Note, Pos, Project, Subdiv, TempoEvent } fro
 import { isPositive, normalize } from '../core/frac'
 import { canonicalize, cmp as pcmp, lt as plt, pos as mkPos } from '../core/pos'
 import { validateSubdiv } from '../core/subdiv'
+import { DEFAULT_METER } from '../core/meter'
 import type { GridRegion } from '../core/grid'
 import { validateGridValue } from '../core/gridValue'
 import { subdivsToRegions } from './gridMigrate'
@@ -414,8 +415,13 @@ export function deserializeProject(raw: unknown): Project {
   // the built map is discarded because §4.1 says runtime structures are not persisted.
   guard('tempoMap', 'is not a valid tempo map', () => buildTempoMap(tempoMap))
 
+  // `meterMap` is not yet part of the `.go.json` format — reading and writing it is
+  // Task 12's work. Every project gets the implicit one-4/4-at-the-origin default
+  // (design §3.7) until then, so `Project` stays fully constructed here.
+  const meterMap = [DEFAULT_METER]
+
   if (o.loop === undefined) {
-    return { version: VERSION, name, tempoMap, layers, notes, activeLayerId }
+    return { version: VERSION, name, tempoMap, layers, notes, activeLayerId, meterMap }
   }
 
   const loopRaw = requireObject(o.loop, 'loop')
@@ -427,7 +433,7 @@ export function deserializeProject(raw: unknown): Project {
   if (!plt(loop.start, loop.end)) {
     fail('loop', `start must be before end, got col ${loop.start.col} .. col ${loop.end.col}`)
   }
-  return { version: VERSION, name, tempoMap, layers, notes, activeLayerId, loop }
+  return { version: VERSION, name, tempoMap, layers, notes, activeLayerId, meterMap, loop }
 }
 
 /**
@@ -495,5 +501,6 @@ export function createEmptyProject(): Project {
     })),
     notes: [],
     activeLayerId: STARTER_LAYERS[0]!.id,
+    meterMap: [DEFAULT_METER],
   }
 }

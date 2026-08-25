@@ -3,6 +3,7 @@ import { Midi } from '@tonejs/midi'
 import type { Layer, Note, Project, TempoEvent } from '../core/types'
 import { frac } from '../core/frac'
 import { pos } from '../core/pos'
+import { DEFAULT_METER } from '../core/meter'
 import type { InstrumentManifest } from '../audio/manifest'
 import {
   FALLBACK_PPQ,
@@ -52,6 +53,7 @@ function project(over: Partial<Project> = {}): Project {
     layers: [layer()],
     notes: [],
     activeLayerId: 'l1',
+    meterMap: [DEFAULT_METER],
     ...over,
   }
 }
