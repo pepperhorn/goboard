@@ -1,7 +1,7 @@
 import type { Pos } from '../core/types'
 import type { Meter } from '../core/meter'
 import { barLinesIn, barNumberAt } from '../core/meter'
-import { key as posKey, pos, toQuarters } from '../core/pos'
+import { pos, toQuarters } from '../core/pos'
 import {
   MARKER_BAND_HEIGHT, markerCenterX, markerLabel, markerWidth,
 } from './meterMarkers'
@@ -112,26 +112,33 @@ export function drawRuler(
   ctx.textBaseline = 'alphabetic'
   ctx.textAlign = 'left'
 
-  // Bars count from 1 at the anchor. A tick is labelled only when it IS a bar start —
-  // otherwise every tick at `stride` would repeat its containing bar's number — and
-  // only when that bar's number is positive: the anchor's bar arithmetic extrapolates
-  // backwards past the origin, so a bar line left of it computes to bar 0, -1, ... —
-  // arithmetically real but not a bar that exists.
-  const barKeys = new Set(barLinesIn(meterMap, pos(start), pos(end)).map(posKey))
-
   for (let col = Math.ceil(start / stride) * stride; col <= end; col += stride) {
     const x = Math.round(quartersToX(vp, col)) + 0.5
     ticks.moveTo(x, h - 7)
     ticks.lineTo(x, h)
-    const p = pos(col)
-    if (barKeys.has(posKey(p))) {
-      const { bar } = barNumberAt(meterMap, p)
-      if (bar >= 1) ctx.fillText(`${bar}`, x + 3, h - 10)
-    }
   }
   ctx.strokeStyle = theme.gutterEdge
   ctx.lineWidth = 1
   ctx.stroke(ticks)
+
+  // Bars count from 1 at the anchor. Labels are driven off the actual bar-line
+  // positions, not off the tick loop above: a bar start is frequently not an integer
+  // column on a `stride` multiple (any odd-eighth meter has fractional bar starts,
+  // and `labelStride` skips columns once zoomed out), so intersecting bar starts with
+  // ticks silently drops those labels. Instead labels thin out by proximity to the
+  // previously drawn one, and a bar number is skipped only when it is non-positive:
+  // the anchor's bar arithmetic extrapolates backwards past the origin, so a bar line
+  // left of it computes to bar 0, -1, ... — arithmetically real but not a bar that
+  // exists.
+  let lastLabelX = -Infinity
+  for (const p of barLinesIn(meterMap, pos(start), pos(end))) {
+    const { bar } = barNumberAt(meterMap, p)
+    if (bar < 1) continue
+    const x = quartersToX(vp, toQuarters(p))
+    if (x - lastLabelX < 48) continue
+    ctx.fillText(`${bar}`, x + 3, h - 10)
+    lastLabelX = x
+  }
 
   ctx.beginPath()
   ctx.moveTo(0, h - 0.5)

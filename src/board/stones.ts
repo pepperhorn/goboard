@@ -102,9 +102,9 @@ export function drawStones(
       // a visible column is rasterized even when its row is far off screen.
       if (cy + radius < y0 || cy - radius > y1) continue
       // Off-grid (§7) iff the note's own onset isn't the slot start the cursor just
-      // resolved — reusing that slot rather than a standalone `isOnGrid` lookup, which
-      // would re-run `regionIndexAt` per note and defeat the cursor (§3.6). This is the
-      // one and only off-grid predicate; nothing else in the codebase duplicates it.
+      // resolved — reusing that slot rather than calling the standalone `isOnGrid`
+      // (src/core/grid.ts) predicate, which would re-run `regionIndexAt` per note and
+      // defeat the cursor (§3.6).
       const offGrid = !posEq(slot.start, note.pos)
       const color = offGrid ? mutedColor(layer.color) : layer.color
       drawStone(

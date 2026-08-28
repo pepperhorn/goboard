@@ -88,4 +88,25 @@ describe('drawRuler bar labels', () => {
     const labels = paint(vp, { width: 700, height: 28 }, [meter])
     expect(labels).toEqual(['1', '2', '3'])
   })
+
+  it('labels every bar of a 7/8 meter, whose 3.5-quarter bar starts are never on a tick', () => {
+    // 7/8: beatUnit 1/2, groups [2,2,3] -> bar length 3.5 quarters. Bar lines at
+    // 0, 3.5, 7, 10.5, 14, 17.5 - only the integer ones (0, 7, 14) ever coincide with
+    // an integer-column tick, which is exactly the bug: labelling off the tick loop
+    // intersected with bar starts drops every bar whose start is a half-quarter.
+    const meter: Meter = { pos: { col: 0, frac: frac(0) }, beatUnit: frac(1, 2), groups: [2, 2, 3] }
+    const labels = paint(vp, { width: 1800, height: 28 }, [meter])
+    expect(labels).toEqual(['1', '2', '3', '4', '5', '6'])
+  })
+
+  it('keeps labelling every bar of 3/4 when zoomed out enough to skip ticks', () => {
+    // Below 48 px/quarter, labelStride steps ticks by 2 columns, so only even columns
+    // are ticks. 3/4's bar lines (multiples of 3) land on an even column only every
+    // other bar (6, 12, 18, ...) - the same "tick ^ bar start" bug as the 7/8 case,
+    // just reached by zooming out instead of by a fractional meter.
+    const meter: Meter = { pos: { col: 0, frac: frac(0) }, beatUnit: frac(1), groups: [3] }
+    const zoomedOut: Viewport = { ...vp, pxPerQuarter: 30 }
+    const labels = paint(zoomedOut, { width: 1000, height: 28 }, [meter])
+    expect(labels).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12'])
+  })
 })
