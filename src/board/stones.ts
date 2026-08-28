@@ -1,7 +1,9 @@
-import type { Layer, LayerId, Note, Subdiv } from '../core/types'
+import type { Layer, LayerId, Note } from '../core/types'
 import { toNumber } from '../core/frac'
-import { eq as fracEq } from '../core/frac'
-import { slotAt } from '../core/subdiv'
+import type { GridRegion } from '../core/grid'
+import type { GridCursor } from '../core/gridCursor'
+import { createGridCursor } from '../core/gridCursor'
+import { eq as posEq } from '../core/pos'
 import type { NoteIndex } from '../core/noteIndex'
 import { StoneAtlas, drawStone } from './atlas'
 import { noteRect } from './hitTest'
@@ -22,26 +24,16 @@ export type StoneContext = {
   /** Visible layers in draw order, active last (§5.2). */
   readonly layers: readonly Layer[]
   readonly activeLayerId: LayerId
-  readonly subdivFor: (layerId: LayerId, col: number) => Subdiv | undefined
+  readonly gridFor: (layerId: LayerId) => readonly GridRegion[]
   /** Kit layers draw all-black — key color is meaningless for drums (§9.3). */
   readonly isKit: (layerId: LayerId) => boolean
   readonly maxDurQuarters: number
 }
 
 /** Drawn width of the slot a note sits in, which sets its stone radius. */
-export function slotWidthFor(vp: Viewport, sd: Subdiv | undefined, note: Note): number {
-  const slot = slotAt(sd, note.pos.frac)
-  return slot ? quartersToWidth(vp, toNumber(slot.dur)) : vp.pxPerQuarter
-}
-
-/**
- * A note is off-grid when its position is not a slot start of its layer's current
- * subdivision — legal by design, since changing a subdivision re-quantizes nothing
- * (§7). It draws with a muted ring to flag that.
- */
-export function isOffGrid(sd: Subdiv | undefined, note: Note): boolean {
-  const slot = slotAt(sd, note.pos.frac)
-  return !slot || !fracEq(slot.start, note.pos.frac)
+export function slotWidthFor(vp: Viewport, cursor: GridCursor, note: Note): number {
+  const slot = cursor.slotAt(note.pos)
+  return quartersToWidth(vp, toNumber(slot.dur))
 }
 
 /** Mix a layer color toward the board, for the off-grid flag. */
@@ -94,9 +86,13 @@ export function drawStones(
     // One globalAlpha assignment per layer, not per stone (§5.3).
     ctx.globalAlpha = active ? 1 : 0.45
 
+    // One cursor per layer per frame (§3.6): notes come out of `queryRange` in
+    // ascending `pos` order, so this is a forward walk, never a binary search.
+    const cursor = createGridCursor(scene.gridFor(layer.id))
+
     for (const note of scene.index.queryRange(layer.id, start, end)) {
-      const sd = scene.subdivFor(layer.id, note.pos.col)
-      const slotW = slotWidthFor(vp, sd, note)
+      const slot = cursor.slotAt(note.pos)
+      const slotW = quartersToWidth(vp, toNumber(slot.dur))
       const rect = noteRect(vp, note, slotW)
       if (rect.x > x1 || rect.x + rect.width < x0) continue
 
@@ -105,7 +101,12 @@ export function drawStones(
       // Vertical cull: `queryRange` is keyed by column, so without this every note in
       // a visible column is rasterized even when its row is far off screen.
       if (cy + radius < y0 || cy - radius > y1) continue
-      const color = isOffGrid(sd, note) ? mutedColor(layer.color) : layer.color
+      // Off-grid (§7) iff the note's own onset isn't the slot start the cursor just
+      // resolved — reusing that slot rather than calling the standalone `isOnGrid`
+      // (src/core/grid.ts) predicate, which would re-run `regionIndexAt` per note and
+      // defeat the cursor (§3.6).
+      const offGrid = !posEq(slot.start, note.pos)
+      const color = offGrid ? mutedColor(layer.color) : layer.color
       drawStone(
         ctx,
         atlas,

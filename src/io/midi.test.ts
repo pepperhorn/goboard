@@ -3,6 +3,7 @@ import { Midi } from '@tonejs/midi'
 import type { Layer, Note, Project, TempoEvent } from '../core/types'
 import { frac } from '../core/frac'
 import { pos } from '../core/pos'
+import { DEFAULT_METER } from '../core/meter'
 import type { InstrumentManifest } from '../audio/manifest'
 import {
   FALLBACK_PPQ,
@@ -27,7 +28,7 @@ function layer(over: Partial<Layer> = {}): Layer {
     visible: true,
     defaultVel: 96,
     colVel: new Map(),
-    subdivs: new Map(),
+    grid: [],
     order: 0,
     ...over,
   }
@@ -46,12 +47,13 @@ function note(over: Partial<Note> & Pick<Note, 'pos'>): Note {
 
 function project(over: Partial<Project> = {}): Project {
   return {
-    version: 1,
+    version: 2,
     name: 'Test',
     tempoMap: [{ pos: pos(0), bpm: 120 }],
     layers: [layer()],
     notes: [],
     activeLayerId: 'l1',
+    meterMap: [DEFAULT_METER],
     ...over,
   }
 }
@@ -291,6 +293,32 @@ describe('exportMidi', () => {
   it('clamps a caller-supplied PPQ into the legal 16-bit range', () => {
     expect(parse(exportMidi(project(), { ppq: 99_999 })).header.ppq).toBe(MAX_PPQ)
     expect(parse(exportMidi(project(), { ppq: 0 })).header.ppq).toBe(1)
+  })
+})
+
+describe('time signatures (design §3.7)', () => {
+  it('writes one event per meter change', () => {
+    const p = project({
+      meterMap: [
+        { pos: pos(0), beatUnit: frac(1), groups: [1, 1, 1, 1] },
+        { pos: pos(8), beatUnit: frac(1, 2), groups: [2, 2, 3] },
+      ],
+    })
+    const midi = new Midi(exportMidi(p, { ppq: 480 }))
+    expect(midi.header.timeSignatures.map((t) => [t.ticks, ...t.timeSignature])).toEqual([
+      [0, 4, 4],
+      [3840, 7, 8],
+    ])
+  })
+
+  it('feeds meter positions into the PPQ lcm', () => {
+    const p = project({
+      meterMap: [
+        { pos: pos(0), beatUnit: frac(1), groups: [1, 1, 1, 1] },
+        { pos: pos(4, 1, 3), beatUnit: frac(1, 2), groups: [3, 3] },
+      ],
+    })
+    expect(chooseTicksPerQuarter(p).lcm % 3).toBe(0)
   })
 })
 

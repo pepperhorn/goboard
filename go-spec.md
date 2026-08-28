@@ -7,7 +7,7 @@
 
 ## 1. Concept
 
-A boundless-canvas, grid-based composition environment. Time runs horizontally, pitch runs vertically. Notes are stones placed on a board. Voices live in Photoshop-style layers with independent mute and visibility. Columns subdivide rhythmically per layer, nested up to two levels, with arbitrary tuplet splits (2–16, including 5, 7, 9, 11, 13).
+A boundless-canvas, grid-based composition environment. Time runs horizontally, pitch runs vertically. Notes are stones placed on a board. Voices live in Photoshop-style layers with independent mute and visibility. Each layer carries its own rhythmic grid — a line spacing that can change anywhere along the timeline, at any tuplet the §3.1 lattice allows (5, 7, 9, 11, 13 included), with no depth limit.
 
 The Go metaphor drives the visual language:
 
@@ -81,32 +81,28 @@ if (r < 0) { q--; r += d; }
 while (r >= d) { q++; r -= d; }   // repairs any ±1 float error in the division
 ```
 
-### 3.2 Subdivision tree
+### 3.2 Grid regions
 
-Per **column, per layer**, depth ≤ 2:
+Per **layer**, a sorted list of change points — the same piecewise-constant shape `tempoMap` (§3.3) uses:
 
 ```ts
-type SubdivL2 = { split: number };                    // 1–16, no children — depth limit is in the type
-type Subdiv   = {
-  split: number;                                      // 1–16 (1 = whole column, one slot)
-  children?: (SubdivL2 | null)[];                     // length === split; null = leaf slot
-};
+type GridRegion = { start: Pos; value: Frac };   // value = line spacing, in quarter notes
+                                                  // 1/256 <= value <= 4, reduced,
+                                                  // denominator dividing the §3.1 lattice
+type Layer       = { /* ... */ grid: GridRegion[] };   // sorted by start; replaces the old Subdiv map
 ```
 
-The two-level split is deliberate: a singly-recursive `Subdiv` cannot express "depth ≤ 2", and an imported file nesting deeper blows the 256-slot bound. `children.length === split` is **validated on load/import**, not assumed.
+A region runs until the next region's `start`, or forever if it is last. **Before the first region, and for an empty list, the grid is the implicit default of one quarter** — this also governs negative columns, since the board is boundless leftward, and it is deliberately *not* `tempoMap`'s backward-extrapolation rule (§3.3).
 
-Default (no entry in the map): `{ split: 1 }` — one slot = quarter note.
+**Phase is anchored at `region.start`, never at a global origin.** A region of value 2/3 starting at col 5+1/4 puts its first intersection exactly there. Consequently, **two adjacent regions of equal value are legal and meaningful** — the second resets phase rather than being a no-op.
 
-Example — 16ths with triplet 32nds on the last 16th:
-```ts
-{ split: 4, children: [null, null, null, { split: 3 }] }
-```
+**Slots** stay half-open, as before: slot *k* of a region spans `[start + k·v, min(start + (k+1)·v, next.start))`. The last slot before a region boundary may be **clipped** — it is still a real slot: it draws a line, accepts a stone, and lends its (short) duration to a stone placed there. This is normative for hit-testing, the ruler, and the velocity lane, exactly as the old half-open rule was.
 
-**Slot enumeration** (used by rendering, hit-testing, velocity lane, and note quantization): walk the tree producing ordered slots `{ start: Frac, dur: Frac }` within the column. For slot *i* of a `split: s` node spanning `[a, b)`, slot span is `[a + i·(b−a)/s, a + (i+1)·(b−a)/s)`. Max slots per column = 256.
+**Canonical form**, which autosave's byte-diff depends on: sorted by `start`, no duplicate starts (rejected on import, as duplicate `colVel` columns already are), and a region is dropped only when it is a true no-op — same value as its predecessor *and* a start that already lies on the predecessor's lattice. A same-valued region starting off that lattice changes the phase and must be kept, so **do not compare grid lists by shape** — compare enumerated slots, as `Subdiv` equality once required.
 
-Spans are **half-open**: a boundary belongs to the slot it starts. This is normative — hit-testing, the ruler, and the velocity lane all resolve boundaries this way, and disagreeing would put a click on a barline in the wrong slot.
+Regions subsume the old depth-2 nesting: a `{split, children}` tree was a finite sequence of uniform runs, and each run becomes a region anchored at its own start (e.g. `{split:4, children:[null,null,{split:3},null]}` becomes regions at `0` (value 1/4), `2/4` (value 1/12), `3/4` (value 1/4)). Arbitrary depth comes free, because a region starts at a `Pos` rather than at a column — there is no depth limit left to hit.
 
-**Canonical form.** A `children` array of all `null`s is equivalent to omitting `children`, and a `{split: 1}` child is equivalent to `null`. Validation preserves the input shape rather than canonicalizing, so **do not compare `Subdiv` values structurally** — undo/redo dedup and persistence diffing must compare enumerated slots, not the tree.
+**Persistence.** `.go.json` is format v2. A v1 reader migrates each layer's `Subdiv` map to regions, one region per **uniform run** (not per column — that would flatten a nested column and leave every note inside it off-grid). Losslessness means the enumerated slot starts are identical before and after; tree shape is not preserved and does not need to be.
 
 ### 3.3 Tempo map & seconds conversion
 
@@ -122,9 +118,24 @@ Validation: `bpm > 0` (enforce `bpm ∈ [3.576, 999]` — the lower bound is the
 
 Converting to seconds happens **only** in the scheduler; converting to integer ticks happens **only** at MIDI export.
 
-### 3.4 Meter / barlines (v1)
+### 3.4 Meter / barlines
 
-No time signatures in v1. The board is a stream of quarter columns; a subtle heavier gridline every 4 columns purely as a visual anchor. Meter is a v2 concern.
+```ts
+type Meter   = { pos: Pos; beatUnit: Frac; groups: number[] };
+                         // bar length = sum(groups) × beatUnit
+                         // 6/8 felt as 3+3  → { beatUnit: 1/2, groups: [3, 3] }
+                         // 7/8 felt as 2+2+3 → { beatUnit: 1/2, groups: [2, 2, 3] }
+                         // 4/4               → { beatUnit: 1,   groups: [1, 1, 1, 1] }
+type Project = { /* ... */ meterMap: Meter[] };
+```
+
+`meterMap` is a sorted list of meter changes; it may change any number of times through the piece. A meter change **starts a new bar at its own position**, cutting the previous bar short if the two don't line up — this is what makes every meter's `pos` itself a bar boundary, and what lets a bar be located by arithmetic instead of a walk from the origin. Absent `meterMap` means one 4/4 at the origin, and the map must be anchored at or before column 0 (`buildMeterMap` enforces this before any bar arithmetic runs).
+
+Three line weights render from one map: bar starts draw thick, group starts (a bar's felt beats — the 2+2+3 inside 7/8) draw medium, and grid-region intersections (§3.2) draw thin.
+
+`beatUnit` is restricted so `4/beatUnit` is a power of two — SMF's time-signature denominator is a 2^k field — **and** its denominator must divide the §3.1 lattice. The grid ladder's triplet values (1/3, 2/3, 4/3, 1/6, 1/12) are legal grid spacings but must never leak into a `beatUnit`.
+
+MIDI export writes one time-signature meta event per meter change (numerator `sum(groups)`, denominator `4/beatUnit`). **Grouping does not survive the SMF boundary** — 7/8 felt as 2+2+3 exports as plain 7/8 — and survives only in `.go.json`. Meter positions join note and tempo positions in the PPQ lcm (§10), or time-signature ticks would round while notes do not.
 
 ---
 
@@ -153,17 +164,18 @@ type Layer = {
   visible: boolean;                 // hide from board; independent of audible
   defaultVel: number;               // 0–127, layer-wide default (init 96)
   colVel: Map<number, number>;      // per-column velocity override, keyed by col
-  subdivs: Map<number, Subdiv>;     // per-column subdivision, keyed by col; absent = quarter
+  grid: GridRegion[];               // rhythmic grid, sorted by start; empty = one quarter (§3.2)
   order: number;                    // z-order in layer panel and draw order
 };
 
 type Project = {
-  version: 1;
+  version: 2;                       // §3.2's persistence note: a v1 reader migrates old files
   name: string;
   tempoMap: TempoEvent[];
   layers: Layer[];
   notes: Note[];                    // storage form; runtime keeps indexes (§4.1)
   activeLayerId: LayerId;
+  meterMap: Meter[];                // bar lines, bar numbers, MIDI time signatures (§3.4)
   loop?: { start: Pos; end: Pos };
 };
 ```
@@ -182,7 +194,7 @@ Non-active visible layers draw at reduced opacity (~0.45); the active layer draw
 ### 4.1 Runtime indexes (not persisted)
 
 - `notesByLayer: Map<LayerId, Note[]>` sorted by `pos` — playback iteration, viewport queries.
-- `notesByCell: Map<string, NoteId[]>` keyed by `` `${layerId}:${col}:${pitch}` ``, each bucket sorted by `frac` — placement and toggle. The key deliberately drops `frac`, so a bucket holds every note at that pitch in that column; the scan is short but **not O(1)**, and §7's "changing a subdivision re-quantizes nothing" means bucket size has no 256-slot ceiling — it grows with editing history.
+- `notesByCell: Map<string, NoteId[]>` keyed by `` `${layerId}:${col}:${pitch}` ``, each bucket sorted by `frac` — placement and toggle. The key deliberately drops `frac`, so a bucket holds every note at that pitch in that column; the scan is short but **not O(1)**, and §7's "changing a layer's grid re-quantizes nothing" means bucket size has no 256-slot ceiling — it grows with editing history.
 - `maxDurQuarters: Map<LayerId, number>` — the longest duration on the layer, maintained incrementally.
 
 **Long notes are indexed at their onset only.** A note at col 5 with `dur = 4` draws as a lozenge across cols 5–8 but has no index entry at 6, 7, 8. Both hit-testing and viewport culling must therefore begin their scan at `col − ceil(maxDurQuarters)`, not `col − 1`. Without this, clicking a lozenge's body or right edge finds nothing (so the app places a new stone on top of the one you clicked, and §7's resize gesture — which by definition lands on a *far* column — cannot work), and long notes vanish from the board when you pan right past their onset.
@@ -194,7 +206,7 @@ This is deliberately cheaper than an interval tree, and exact: `maxDurQuarters` 
 
 ### 4.2 Undo/redo
 
-Command pattern: every mutation is a `{ do, undo }` pair pushed to a stack (cap ~500). Covers note add/remove/move, velocity edits, subdivision changes, layer property changes. Zustand store mutations happen only through commands.
+Command pattern: every mutation is a `{ do, undo }` pair pushed to a stack (cap ~500). Covers note add/remove/move, velocity edits, grid changes, layer property changes. Zustand store mutations happen only through commands.
 
 ---
 
@@ -215,7 +227,7 @@ type Viewport = { xQuarters: number; yPitch: number; pxPerQuarter: number; pxPer
 ### 5.2 Draw pass (per dirty frame)
 
 1. Row shading — white-key rows `#f7f5f0`-ish, black-key rows a few % darker; row for C rows gets a faint label (`C3`, `C4`…) in the left gutter.
-2. Column gridlines — quarter lines; heavier every 4th; **subdivision lines for the active layer only** (other layers' grids would be noise).
+2. Column gridlines — three weights: heavy bar lines and medium group (felt-beat) lines, both from the meter map (§3.7), and thin intersection lines from the active layer's grid regions (§3.2); **grid lines for the active layer only** (other layers' grids would be noise).
 3. Stones — for each visible layer in `order`, then active layer last: circle of radius `min(pxPerSemitone, slotWidth) * 0.42`, filled white or black by pitch class `{0,2,4,5,7,9,11}` → white; ring stroke in `layer.color` (2px, full alpha for active layer). Duration beyond one slot renders as a rounded lozenge (stone stretched horizontally to `dur` width).
 4. Playhead — vertical line, position from `secondsToPos` inverse lookup during playback.
 5. Left gutter (pitch labels / drum labels §9.3) and velocity lane (§6.2) are separate canvases stacked in the React layout so they can stay pinned while the board pans.
@@ -232,7 +244,7 @@ type Viewport = { xQuarters: number; yPitch: number; pxPerQuarter: number; pxPer
 3. **Pan is a self-blit.** Pan is pure translation: blit the previous frame at an offset and repaint only the newly exposed strip (~16×1600 px instead of 8.3 Mpx). Biggest single win, because pan is the dominant gesture. Zoom still does a full redraw.
 4. **Playhead and hover ghost live on their own overlay canvas.** Otherwise the playhead sets the dirty flag every frame and the whole board repaints at 60fps for an entire song with zero edits.
 5. **All gridlines batch into one `Path2D`, one `stroke()`** — flattens the worst case (33 columns × 256 slots) from ~12 ms to ~0.5 ms.
-6. **Two subdivision-line guards:** skip the pass when `pxPerQuarter < 48`, *and* skip any depth whose slot width is under 4 px.
+6. **Two grid-line guards:** skip the pass when `pxPerQuarter < 48`, *and* skip any region whose slot width is under 4 px.
 7. **Cap the backing store at `min(devicePixelRatio, 2)`** and snap gridline/rect coordinates to device pixels (`Math.round(x*dpr)/dpr`, +0.5 for 1 px lines). Fractional device positions force antialiasing on every edge — slower *and* blurrier.
 8. **Batch by style:** iterate layer-major (as §5.2 already does) so `strokeStyle` and `globalAlpha` are assigned once per layer, not once per stone.
 
@@ -240,7 +252,7 @@ type Viewport = { xQuarters: number; yPitch: number; pxPerQuarter: number; pxPer
 
 **Canvas coordination.** The board, gutter, velocity lane, and overlay are separate canvases but share **one** rAF owner (three independent loops tear visibly during fast pan), **one** `Viewport` object, and **one** `worldToScreen`. Each canvas bakes `-frac(rect.left*dpr)` / `-frac(rect.top*dpr)` into its own `setTransform`: under browser zoom or a fractional flex width, `rect.left * dpr` is fractional and *differs per canvas*, so lane bars would land up to 1 px off the board's columns. Reassigning `canvas.width/height` clears the surface and resets the transform, so every resize re-applies the transform and forces a full redraw of all four; DPR changes at runtime (window dragged to another monitor) need a `matchMedia('(resolution: Xdppx)')` listener.
 
-**Benchmark, not prose.** M2 records a scripted frame-time number at a fixed viewport and DPR, and it is re-run at every subsequent milestone — the target will otherwise rot quietly as the playhead, lane, and subdivision lines add per-frame work.
+**Benchmark, not prose.** M2 records a scripted frame-time number at a fixed viewport and DPR, and it is re-run at every subsequent milestone — the target will otherwise rot quietly as the playhead, lane, and grid lines add per-frame work.
 
 ---
 
@@ -256,11 +268,13 @@ note.vel  →  layer.colVel.get(note.pos.col)  →  layer.defaultVel
 
 Column-level velocity is **time-linear per layer**: all notes in a column stack share it unless individually overridden. This satisfies: layer default → column default → per-note override in a chord.
 
+**Storage stays column-keyed** even after §3.2's grid regions made resolution's third input — the lane's unit of display — a slot rather than a column. Since a grid value may now be coarser than a quarter, one slot can span two or four columns, and the lane shows a slot's velocity as the value at the slot's **starting** column; a drag on that slot writes the same value to **every column it covers**, clearing anything stale in the range it now owns. Resolution order above is unchanged for every note, on-grid or off — only the lane's write path changed. A known consequence: under an off-phase coarse grid, consecutive slots can cover overlapping column ranges, so editing one slot's bar can shift a neighbouring slot's displayed value. That follows from column-keyed storage and is deliberate; representing it faithfully would need slot-keyed storage, a model change beyond this work.
+
 ### 6.2 Velocity lane
 
 - Fixed strip at the bottom of the viewport (~96 px), horizontally locked to the board's pan/zoom.
 - Shows the **active layer only**, in its layer color.
-- One vertical bar per **slot** of that column's subdivision (enumerated from the layer's `Subdiv`), height = effective velocity /127.
+- One vertical bar per **slot** governing that column (enumerated from the layer's grid, §3.2 — a slot may span more than one column), height = effective velocity /127.
 - Slots containing notes draw solid; empty slots draw a faint ghost bar at the would-be effective velocity (so you can pre-shape dynamics).
 - Drag on a bar → sets `colVel[col]` when the column has one slot, or a **slot-level refinement**: v1 simplification — dragging a bar sets `vel` on all notes in that slot; dragging across bars paints. Alt-drag on a single stone's bar segment sets only that note (chord-internal override). If a column has both overridden and inherited notes, the bar renders split (segments per distinct velocity).
 - Numeric entry via inspector for precision (0–127).
@@ -271,7 +285,7 @@ Column-level velocity is **time-linear per layer**: all notes in a column stack 
 
 ### 7.1 The ruler
 
-§5.2's draw pass gains a **ruler strip** pinned above the board, horizontally locked to the board's pan/zoom. It is a single surface — column numbers, the loop region, and the playhead handle — and it owns every gesture in the "ruler" rows below. There is no separate "column header".
+§5.2's draw pass gains a **ruler strip** pinned above the board, horizontally locked to the board's pan/zoom. It is a single surface — bar numbers (labelled only at bar starts, from 1 at the anchor, never non-positive), the loop region, and the playhead handle — and it owns every gesture in the "ruler" rows below. There is no separate "column header".
 
 ### 7.2 Gestures
 
@@ -288,17 +302,21 @@ Column-level velocity is **time-linear per layer**: all notes in a column stack 
 | Ruler | Click | Seek playhead |
 | Ruler | Drag | Set loop region |
 | Ruler | Shift-click | Clear loop region |
-| Ruler | Right-click / long-press a column | Subdivision editor for that column (active layer): pick split 1–16; then optionally tap a slot and pick a nested split 2–16 |
+| Ruler | Right-click / long-press a column | Grid editor for that range (active layer): pick a line spacing from the eleven presets, or type a custom `n/d` tuplet. Default range is the clicked column to the next |
+| Ruler (marker band) | Drag a meter marker | Move that meter change to the nearest bar line of the surrounding meter (one command) |
+| Ruler (marker band) | Right-click a meter marker | Remove that meter change |
 | Any | Space | Play/stop from playhead |
 | Any | Wheel | Pan vertically |
 | Any | Shift+wheel | Pan horizontally |
 | Any | Middle-drag / two-finger drag | Pan |
 | Any | Ctrl+wheel / pinch | Zoom about the cursor |
 | Any | Ctrl+Z / Ctrl+Shift+Z | Undo/redo |
-| Any | `1`–`9`, `0` | Quick-set split 1–10 on the hovered column (or hovered slot, if the pointer is inside a subdivided column — that sets the nested split) |
-| Any | `Shift+1`–`Shift+6` | Quick-set split 11–16, same target rule |
+| Any | `1`–`9`, `0` | Quick-set the grid to `1/n` quarters (n = 1–10) over the hovered slot's column |
+| Any | `Shift+1`–`Shift+6` | Quick-set `1/11`–`1/16` quarters, same target rule |
 
 **Bindings deliberately not used.** `Space+drag` to pan is dropped — play fires on keydown, so arming the pan would start playback. `Alt-drag` is not a board binding: GNOME and KDE consume it for window moves, and §6.2 already uses Alt in the velocity lane.
+
+**The meter marker band.** Markers own a 12 px band at the top of the ruler strip and win there for both gestures above; below the band, click-seek, drag-loop, shift-click-clear and right-click-grid-editor are exactly as documented above. The first meter (§3.4) cannot be moved off the origin or removed — right-clicking or dragging it opens the grid editor instead — because the bar arithmetic requires the map stay anchored at or before the origin.
 
 ### 7.3 Rules the gestures depend on
 
@@ -314,7 +332,7 @@ Column-level velocity is **time-linear per layer**: all notes in a column stack 
 - **Kit layers reject placement** on unmapped rows (§9.3) — the click is a silent no-op, not a pan.
 - **Canvas event hygiene:** `touch-action: none`, `user-select: none`, native context menu suppressed, middle-mousedown default prevented (Linux paste / Windows autoscroll), `wheel` bound with `{passive: false}` on the element (React's `onWheel` cannot reliably `preventDefault` browser page zoom), `e.repeat` filtered on Space, and Space `preventDefault`ed globally so it doesn't activate a focused layer-panel button.
 
-Notes placed where no subdivision exists land on the quarter slot. Changing a column's subdivision **re-quantizes nothing** — existing notes keep their exact rational positions; they may sit off the new grid (render slightly desaturated ring to flag "off-grid for this layer's current subdiv").
+Notes placed where no region governs land on the implicit quarter slot (§3.2). Changing a layer's grid **re-quantizes nothing** — existing notes keep their exact rational positions; they may sit off the new grid (render slightly desaturated ring to flag "off-grid for this layer's current grid").
 
 ---
 
@@ -394,7 +412,7 @@ When the active layer's instrument is `kind: "kit"`:
 - Rows without a mapped piece render dimmed and reject placement.
 - Stone color: all black (key-color semantics are meaningless for drums); layer ring as usual.
 - Pitch stays a real GM MIDI number internally → export needs no special casing beyond channel 10.
-- **Durations are forced to one slot.** Drum samples are one-shots, so duration is meaningless; the right-edge resize gesture (§7) is disabled on kit layers, and MIDI export writes a short fixed note-off. (Resolves open question 1.)
+- **Durations are capped, not forced to one slot.** Drum samples are one-shots, so a kit stone's duration is `min(slotDur, 1/4)` quarters (design §3.5) — a whole-note grid does not give a four-quarter kick, but a finer grid still gives its true (shorter) slot length. The right-edge resize gesture (§7) is disabled on kit layers, and MIDI export writes a short fixed note-off. (Resolves open question 1.)
 
 ### 9.4 v1 instrument set
 
@@ -421,19 +439,19 @@ A handful of sampled pitches per instrument is enough — smplr stretches betwee
   Tuplets that still don't divide evenly round to nearest tick **at export only** (the sole place quantization error is permitted). Round **absolute** ticks and then difference them for delta-times — never round deltas, or a 0.45-tick error accumulates to roughly half a quarter note over 1000 events. Note that the damage is in duration, not onset: at 960 the smallest legal slot (1/256 quarter) is 3.75 ticks and rounds to 4, a 6.7% error, while onset error is 0.24 ms at 120 BPM.
 
   One track per layer, program change from `gmProgram`, kit layers to channel 10, tempo map to meta events (24-bit µs/quarter — clamp BPM to ≥ 3.576). Use `@tonejs/midi` for writing (the library is fine even though Tone.js itself isn't used).
-- **Future (v2+):** MEI export. Rational durations + subdivision trees map near-directly onto MEI proportional durations/tuplet elements → straight path into the Verovio pipeline. Design nothing that blocks this; requires no v1 work.
+- **Future (v2+):** MEI export. Rational durations + grid regions map near-directly onto MEI proportional durations/tuplet elements → straight path into the Verovio pipeline. Design nothing that blocks this; requires no v1 work.
 
 ---
 
 ## 11. v1 Scope
 
-**In:** boundless board, per-layer nested subdivision (≤2 deep, splits 1–16), stones/rings visual language, layer panel (add/rename/color/reorder/mute/hide), velocity lane with column + per-note override, lookahead playback with loop, tempo (single BPM in v1 UI; tempo *map* in the model), 4 starter instruments, kit row labels, undo/redo, IndexedDB autosave, JSON + MIDI export.
+**In:** boundless board, per-layer grid regions (line spacing 1/256–4 quarters, any lattice fraction, arbitrary depth via region anchors — §3.2), grouped meter map with ruler markers and bar/group/intersection line weights (§3.4), stones/rings visual language, layer panel (add/rename/color/reorder/mute/hide), velocity lane with column + per-note override, lookahead playback with loop, tempo (single BPM in v1 UI; tempo *map* in the model), 4 starter instruments, kit row labels, undo/redo, IndexedDB autosave, JSON + MIDI export.
 
-**Out (v2+):** time signatures/meter, tempo-map editing UI, note selection marquee & multi-select ops, copy/paste, MEI export, curated sample library authoring, PixiJS renderer, collaboration, mobile touch polish beyond basic pan/place.
+**Out (v2+):** tempo-map editing UI, note selection marquee & multi-select ops, copy/paste, MEI export, curated sample library authoring, PixiJS renderer, collaboration, mobile touch polish beyond basic pan/place.
 
 **Open questions (decide during build, none blocking):**
-1. ~~Duration model for drums~~ — **resolved in v1.1:** kit layers force one-slot durations (§9.3). It affects M3's resize gesture, not M6.
-2. Off-grid stone flagging UX after subdivision change (§7) — desaturated ring vs. warning dot.
+1. ~~Duration model for drums~~ — **resolved in v1.1:** kit layers cap duration at `min(slotDur, 1/4)` quarters (§9.3). It affects M3's resize gesture, not M6.
+2. Off-grid stone flagging UX after a grid change (§7) — desaturated ring vs. warning dot.
 3. Ghost bars in the velocity lane — useful or noise? Ship behind a toggle.
 
 ---
@@ -456,4 +474,4 @@ A handful of sampled pitches per instrument is enough — smplr stretches betwee
 
 **M7 — Persistence & export.** IndexedDB autosave, MIDI export with PPQ selection, round-trip test (export → parse → compare within tick tolerance).
 
-Each milestone is independently demoable; M1 ships as a pure library with tests before any pixel is drawn. Playwright covers two or three smoke flows only — everything else above is headless.
+Each milestone is independently demoable; M1 ships as a pure library with tests before any pixel is drawn. Playwright covers six smoke flows — everything else above is headless.

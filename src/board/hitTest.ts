@@ -1,7 +1,9 @@
-import type { Frac, Layer, LayerId, Note, Pos, Subdiv } from '../core/types'
+import type { Frac, Layer, LayerId, Note, Pos } from '../core/types'
 import type { NoteIndex } from '../core/noteIndex'
-import { frac, toNumber } from '../core/frac'
-import { pos as makePos } from '../core/pos'
+import type { GridCursor } from '../core/gridCursor'
+import { toNumber } from '../core/frac'
+import { add as posAdd } from '../core/pos'
+import { quartersToPos } from '../core/tempo'
 import type { Viewport } from './viewport'
 import {
   MAX_PITCH, MIN_PITCH, pitchToCenterY, posToX, quartersToWidth, stoneRadius, xToQuarters,
@@ -28,9 +30,6 @@ import {
 /** The slot a click resolves to: an exact rational onset, its duration, and the row. */
 export type SlotHit = { readonly pos: Pos; readonly dur: Frac; readonly pitch: number }
 
-/** The active layer's subdivision for a column; `undefined` means the `{split:1}` default. */
-export type SubdivFor = (col: number) => Subdiv | undefined
-
 /** Drawn bounds of a stone, in screen pixels. */
 export type Rect = {
   readonly x: number
@@ -54,63 +53,39 @@ export type HitOptions = {
 }
 
 /**
- * Tolerance, in slot widths, for landing a click on a boundary.
- *
- * Spans are half-open — the boundary belongs to the slot it *starts* (§3.2) — but the
- * pointer arrives as a float, and `32/96 * 3` is `0.9999999999999999`, so a bare
- * `Math.floor` puts a click on a triplet boundary in the previous slot. The snap is
- * ~1e-7 px at any legal zoom: far below the pointer's own resolution, and it never
- * moves the *rational* result, which is built from the slot index.
- */
-const BOUNDARY_EPS = 1e-9
-
-/** Index of the slot containing `u` (in slot units), snapped up at a boundary and clamped. */
-function slotIndex(u: number, count: number): number {
-  let i = Math.floor(u)
-  if (u - i >= 1 - BOUNDARY_EPS) i += 1
-  return i < 0 ? 0 : i >= count ? count - 1 : i
-}
-
-/**
  * The slot that would receive a new stone at a screen point, or `null` outside the
  * MIDI range.
  *
- * The slot *index* comes from float pixel math; the returned `Frac` is then built from
- * that integer index through `frac.ts` — a float is never rounded into a rational
- * (§3.1). This is the likeliest place for a float to leak into the model, and the
- * denominators here (`split` and `split * child.split`) are exactly the ones
- * `enumerateSlots` produces, so the two agree by construction.
+ * Stones sit on intersections (design doc): the pointer resolves to whichever
+ * intersection is *nearer*, not the cell it falls inside. The float pixel position is
+ * used only to pick a side — `quartersToPos` turns `x` into an approximate `Pos` just
+ * well enough to ask the cursor which slot governs it, and every returned value
+ * (`slot.start`, `slot.start + slot.dur`) comes back out of exact region maths. The
+ * approximated `Pos` itself is never returned or stored (§3.1) — only used to choose
+ * *which* slot to query.
  */
 export function pointToSlot(
   vp: Viewport,
-  subdivFor: SubdivFor,
+  cursor: GridCursor,
   x: number,
   y: number,
 ): SlotHit | null {
   const pitch = yToPitch(vp, y)
   if (pitch < MIN_PITCH || pitch > MAX_PITCH) return null
 
-  const q = xToQuarters(vp, x)
-  let col = Math.floor(q)
-  let off = q - col
-  // The column boundary starts the next column, on the same half-open rule.
-  if (off >= 1 - BOUNDARY_EPS) {
-    col += 1
-    off = 0
-  }
+  const approx = quartersToPos(xToQuarters(vp, x))
+  const slot = cursor.slotAt(approx)
+  const end = posAdd(slot.start, slot.dur)
 
-  const sd = subdivFor(col)
-  const split = sd?.split ?? 1
-  const i = slotIndex(off * split, split)
-  const child = sd?.children?.[i] ?? null
-  if (child === null) {
-    return { pos: makePos(col, i, split), dur: frac(1, split), pitch }
+  const startX = posToX(vp, slot.start)
+  const endX = posToX(vp, end)
+  if (Math.abs(x - endX) < Math.abs(x - startX)) {
+    // The nearer intersection is the one where the NEXT slot starts — its own
+    // duration (possibly clipped again) is what a stone placed there inherits.
+    const next = cursor.slotAt(end)
+    return { pos: next.start, dur: next.dur, pitch }
   }
-  // Sub-slot j of slot i starts at (i*t + j)/(s*t) — formed from integers, exactly as
-  // `enumerateSlots` does, never as `i/s + j/(s*t)` in floats.
-  const t = child.split
-  const j = slotIndex((off * split - i) * t, t)
-  return { pos: makePos(col, i * t + j, split * t), dur: frac(1, split * t), pitch }
+  return { pos: slot.start, dur: slot.dur, pitch }
 }
 
 /**
@@ -121,16 +96,18 @@ export function pointToSlot(
  * stone grows it rightwards and never shifts its head — and an off-grid note is drawn
  * on its own span rather than snapped to a grid it does not sit on.
  *
- * `slotWidthPx` is the width of one slot of the note's layer subdivision at its onset
- * column. It defaults to `min(durWidth, pxPerQuarter)`: a slot is never wider than a
- * whole column, and a note is never narrower than the slot it was placed in (§4), so
- * the default is exact for the common cases and degrades to "one stone per column"
- * for a long note in a column whose subdivision the caller did not supply.
+ * `slotWidthPx` is the width, in px, of the grid slot the note was placed in. A grid
+ * line spacing can be coarser than one column (§3.2 — a whole-note grid, say), so
+ * unlike the old per-column `Subdiv`, a slot is NOT assumed to be at most one column
+ * wide; the caller-supplied width is honoured as given, never re-clamped to
+ * `vp.pxPerQuarter`. Omitted, it falls back to the note's own duration — the least
+ * assuming guess when the caller has no grid to consult — rather than a column.
  */
 export function noteRect(vp: Viewport, note: Note, slotWidthPx?: number): Rect {
   const durW = quartersToWidth(vp, toNumber(note.dur))
-  const slotW = slotWidthPx ?? vp.pxPerQuarter
-  // A degenerate `dur = 0` note still draws its head, rather than vanishing.
+  // A degenerate `dur = 0` note still draws its head, rather than vanishing — the
+  // fallback can't be `durW` itself then, so it drops back to one quarter.
+  const slotW = slotWidthPx ?? (durW > 0 ? durW : vp.pxPerQuarter)
   const unit = durW > 0 ? Math.min(slotW, durW) : slotW
   const r = stoneRadius(vp, unit)
 

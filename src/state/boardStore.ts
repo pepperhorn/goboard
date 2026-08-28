@@ -1,11 +1,15 @@
 import { nanoid } from 'nanoid'
-import type { Frac, Layer, LayerId, Note, NoteId, Pos, Project, Subdiv } from '../core/types'
+import type { Frac, Layer, LayerId, Note, NoteId, Pos, Project } from '../core/types'
 import { CommandStack } from '../core/command'
 import type { Command } from '../core/command'
 import { NoteIndex } from '../core/noteIndex'
 import { buildTempoMap } from '../core/tempo'
 import type { TempoMap } from '../core/tempo'
-import { eq as posEq } from '../core/pos'
+import type { Meter } from '../core/meter'
+import { buildMeterMap, validateMeter } from '../core/meter'
+import { ORIGIN, cmp as posCmp, eq as posEq, key as posKey } from '../core/pos'
+import type { GridRegion, GridSlot } from '../core/grid'
+import { setGridRange as computeGridRange, slotAt as slotAtGrid } from '../core/grid'
 import { initialViewport } from '../board/viewport'
 import type { Size, Viewport } from '../board/viewport'
 
@@ -30,6 +34,18 @@ export class BoardStore {
   private project: Project
   private index: NoteIndex
   private tempo: TempoMap
+  /**
+   * The **built** meter map — `buildMeterMap(project.meterMap)`, kept beside the
+   * project the way `tempo` is.
+   *
+   * Two reasons it lives here rather than being rebuilt by each reader. It is the
+   * only form with the anchoring invariant `barLinesIn` / `groupLinesIn` /
+   * `barNumberAt` require, so a reader that forgot to build would throw from a draw
+   * path (`assertAnchored`). And it is the form the UI indexes into: a marker the user
+   * grabs is `meter[i]`, so `moveMeter` / `removeMeter` must mean the same `i`.
+   * Rebuilding per reader would let a prepended default shift the indices apart.
+   */
+  private meter: readonly Meter[]
   private viewport: Viewport
   private readonly listeners = new Set<BoardListener>()
 
@@ -42,6 +58,7 @@ export class BoardStore {
     this.project = project
     this.index = NoteIndex.build(project.notes)
     this.tempo = buildTempoMap(project.tempoMap)
+    this.meter = buildMeterMap(project.meterMap)
     this.viewport = initialViewport(size)
     this.commands = new CommandStack({
       onCommit: () => {
@@ -78,6 +95,14 @@ export class BoardStore {
     return this.tempo
   }
 
+  /**
+   * The built meter map (§3.7). Safe to hand straight to `barLinesIn`, `groupLinesIn`
+   * and `barNumberAt`, and the list marker indices refer to.
+   */
+  getMeterMap(): readonly Meter[] {
+    return this.meter
+  }
+
   getViewport(): Viewport {
     return this.viewport
   }
@@ -100,8 +125,12 @@ export class BoardStore {
       a.id === active ? 1 : b.id === active ? -1 : a.order - b.order)
   }
 
-  subdivFor(layerId: LayerId, col: number): Subdiv | undefined {
-    return this.layer(layerId)?.subdivs.get(col)
+  gridFor(layerId: LayerId): readonly GridRegion[] {
+    return this.layer(layerId)?.grid ?? []
+  }
+
+  slotAt(layerId: LayerId, at: Pos): GridSlot {
+    return slotAtGrid(this.gridFor(layerId), at)
   }
 
   /** Longest duration on any visible layer — the §4.1 cull/hit widening. */
@@ -256,22 +285,20 @@ export class BoardStore {
     this.run({ label: 'Select layer', do: () => swap(id), undo: () => swap(prev) })
   }
 
-  /** Per-column subdivision for a layer. Re-quantizes nothing (§7). */
-  setSubdiv(layerId: LayerId, col: number, sd: Subdiv | undefined): void {
+  /** §7.3: one command, however many regions the edit touches. Re-quantizes nothing. */
+  setGridRange(layerId: LayerId, from: Pos, to: Pos | undefined, value: Frac): void {
     const l = this.layer(layerId)
     if (!l) return
-    const prev = l.subdivs.get(col)
-    const swap = (to: Subdiv | undefined) => {
-      const subdivs = new Map(l.subdivs)
-      if (to === undefined || to.split === 1) subdivs.delete(col)
-      else subdivs.set(col, to)
+    const prev = l.grid
+    const next = computeGridRange(prev, from, to, value)
+    const swap = (grid: readonly GridRegion[]) => {
       this.project = {
         ...this.project,
-        layers: this.project.layers.map((x) => (x.id === layerId ? { ...x, subdivs } : x)),
+        layers: this.project.layers.map((x) => (x.id === layerId ? { ...x, grid } : x)),
       }
       this.touch()
     }
-    this.run({ label: 'Subdivide column', do: () => swap(sd), undo: () => swap(prev) })
+    this.run({ label: 'Set grid', do: () => swap(next), undo: () => swap(prev) })
   }
 
   setColVel(layerId: LayerId, col: number, vel: number | undefined): void {
@@ -289,6 +316,140 @@ export class BoardStore {
       this.touch()
     }
     this.run({ label: 'Column velocity', do: () => swap(vel), undo: () => swap(prev) })
+  }
+
+  /**
+   * Set every column in the half-open range `[fromCol, toCol)` to `vel` (design §3.4).
+   *
+   * Velocity storage stays column-keyed even though the lane is slot-scoped, so a lane
+   * edit on a slot spanning several columns has to write all of them — otherwise a note
+   * later placed in the slot's second column would inherit a stale value from before
+   * the edit. Passing `undefined` clears the range instead.
+   *
+   * One command for the whole range (§7.3): the previous map is captured whole, so undo
+   * restores columns the range overwrote as well as those it created.
+   */
+  setColVelRange(layerId: LayerId, fromCol: number, toCol: number, vel: number | undefined): void {
+    const l = this.layer(layerId)
+    if (!l || toCol <= fromCol) return
+    const prev = new Map(l.colVel)
+    const next = new Map(l.colVel)
+    for (let col = fromCol; col < toCol; col++) {
+      if (vel === undefined) next.delete(col)
+      else next.set(col, vel)
+    }
+    const swap = (colVel: ReadonlyMap<number, number>) => {
+      this.project = {
+        ...this.project,
+        layers: this.project.layers.map((x) =>
+          x.id === layerId ? { ...x, colVel: new Map(colVel) } : x),
+      }
+      this.touch()
+    }
+    this.run({ label: 'Column velocity', do: () => swap(next), undo: () => swap(prev) })
+  }
+
+  // --- meter (§3.7), every edit a command ---
+
+  /*
+   * Why all three of these go through `run` rather than assigning `project.meterMap`
+   * directly: `BoardView` caches the map against `commitVersion`, which only moves in
+   * the command stack's `onCommit`. A mutation outside a command would leave the board
+   * drawing last commit's bar lines until something unrelated committed. It is also
+   * the §7.3 rule — one undoable command per gesture — and a meter change that could
+   * not be undone would be the only edit on the ruler that could not.
+   */
+
+  /** Both maps at once, so `project.meterMap` and `this.meter` can never disagree. */
+  private swapMeter(next: readonly Meter[]): void {
+    this.project = { ...this.project, meterMap: next }
+    this.meter = next
+    this.touch()
+  }
+
+  /** The map with `m` inserted, replacing any meter already at the same position. */
+  private meterMapWith(m: Meter): readonly Meter[] {
+    const kept = this.meter.filter((x) => !posEq(x.pos, m.pos))
+    return buildMeterMap([...kept, m].sort((a, b) => posCmp(a.pos, b.pos)))
+  }
+
+  /**
+   * Add a meter change, or replace the one already at that position.
+   *
+   * Throws a `RangeError` naming the failing field for anything `validateMeter` would
+   * reject — a triplet `beatUnit`, one off the §3.1 lattice, an empty or non-integer
+   * `groups` — so the grid menu can report it the way it reports an off-lattice tuplet,
+   * rather than letting an unrenderable meter into the project.
+   *
+   * The validator is deliberately the *same* function the file reader calls
+   * (`readMeterMap`, `project.ts`): a rule enforced only here would be a rule a
+   * hand-edited `.go.json` could walk straight past.
+   *
+   * **A position before the origin is refused**, the same invariant `moveMeter`
+   * enforces for a later meter. Exactly the origin is still allowed — that's how a
+   * caller restates the anchor meter itself (see the test of that name) — but a
+   * negative column would become the new `map[0]` once `buildMeterMap` sorts it in,
+   * silently exiling the *real* anchor to index 1. From there `removeMeter(0)` and
+   * `moveMeter(0, …)` both refuse it (by design — see `moveMeter`), `GridMenu` hides
+   * the Remove button for it, and the only way out is undo. Ruler columns left of the
+   * origin are reachable by panning, so this is reachable in the running app, not just
+   * in theory.
+   */
+  setMeter(meter: Meter): void {
+    const m = validateMeter(meter, 'meter')
+    if (posCmp(m.pos, ORIGIN) < 0) {
+      throw new RangeError(`meter.pos: must not be before the origin, got ${posKey(m.pos)}`)
+    }
+    const prev = this.meter
+    const next = this.meterMapWith(m)
+    this.run({
+      label: 'Set meter',
+      do: () => this.swapMeter(next),
+      undo: () => this.swapMeter(prev),
+    })
+  }
+
+  /**
+   * Move meter `index` to `to`. One command for the whole drag (§7.3).
+   *
+   * **Index 0 is refused.** `buildMeterMap` guarantees `map[0].pos` is at or before
+   * the origin, and every function in `meter.ts`'s bar arithmetic asserts it
+   * (`assertAnchored`). Moving the first meter off the origin would therefore not
+   * misdraw the board, it would throw a `RangeError` out of `barLinesIn` on the very
+   * next frame. For the same reason a move onto or before the origin is refused: that
+   * position belongs to the anchor, and letting another meter land there would delete
+   * it. A move onto a position another meter already occupies is refused too — merging
+   * two meters is not what a drag looks like it does.
+   */
+  moveMeter(index: number, to: Pos): void {
+    const prev = this.meter
+    const m = prev[index]
+    if (index <= 0 || m === undefined) return
+    if (posCmp(to, ORIGIN) <= 0) return
+    if (posEq(m.pos, to)) return
+    if (prev.some((x, i) => i !== index && posEq(x.pos, to))) return
+
+    const moved: Meter = { ...m, pos: to }
+    const next = buildMeterMap(
+      [...prev.filter((_, i) => i !== index), moved].sort((a, b) => posCmp(a.pos, b.pos)),
+    )
+    this.run({
+      label: 'Move meter',
+      do: () => this.swapMeter(next),
+      undo: () => this.swapMeter(prev),
+    })
+  }
+
+  /** Delete meter `index`. Index 0 is refused — see `moveMeter` for why. */
+  removeMeter(index: number): void {
+    const prev = this.meter
+    if (index <= 0 || index >= prev.length) return
+    const next = buildMeterMap(prev.filter((_, i) => i !== index))
+    this.run({
+      label: 'Remove meter',
+      do: () => this.swapMeter(next),
+      undo: () => this.swapMeter(prev),
+    })
   }
 
   // --- transport-adjacent project state ---
@@ -334,6 +495,7 @@ export class BoardStore {
     this.project = project
     this.index = NoteIndex.build(project.notes)
     this.tempo = buildTempoMap(project.tempoMap)
+    this.meter = buildMeterMap(project.meterMap)
     this.commands.clear()
     this.commitVersion++
     this.touch()

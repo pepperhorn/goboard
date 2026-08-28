@@ -1,7 +1,12 @@
 import type { Frac, Layer, LayerId, Note, Pos, Project, Subdiv, TempoEvent } from '../core/types'
 import { isPositive, normalize } from '../core/frac'
-import { canonicalize, lt as plt, pos as mkPos } from '../core/pos'
+import { canonicalize, cmp as pcmp, lt as plt, pos as mkPos } from '../core/pos'
 import { validateSubdiv } from '../core/subdiv'
+import { DEFAULT_METER, buildMeterMap, validateMeter } from '../core/meter'
+import type { Meter } from '../core/meter'
+import type { GridRegion } from '../core/grid'
+import { validateGridValue } from '../core/gridValue'
+import { subdivsToRegions } from './gridMigrate'
 import { buildTempoMap } from '../core/tempo'
 import { NoteIndex } from '../core/noteIndex'
 
@@ -10,9 +15,11 @@ import { NoteIndex } from '../core/noteIndex'
  *
  * Two invariants make this module more than `JSON.stringify`:
  *
- * 1. **Deterministic bytes.** `Map` has no JSON form, so `colVel` and `subdivs` become
- *    `[[col, value], ...]` entry arrays — and those entries are *sorted by column*,
- *    never left in insertion order. Autosave (§10) diffs the serialized string to
+ * 1. **Deterministic bytes.** `Map` has no JSON form, so `colVel` becomes a
+ *    `[[col, value], ...]` entry array — sorted by column, never left in insertion
+ *    order. `grid` is already a sorted, deduplicated list (§3.8), so it is written
+ *    in list order instead: sorting it would hide a caller bug (§3.2 §3.8 note in
+ *    `writeGrid`). Autosave (§10) diffs the serialized string to
  *    decide whether anything changed, so two projects that are equal must serialize
  *    identically; otherwise dragging a note back where it came from writes a new
  *    revision. Every object is rebuilt key-by-key here for the same reason: JSON key
@@ -38,8 +45,11 @@ import { NoteIndex } from '../core/noteIndex'
 /** Extension for exported project files (§10). */
 export const PROJECT_FILE_EXT = '.go.json'
 
-/** The only schema version in existence. Bumping it means writing a migration. */
-const VERSION = 1
+/** The current schema version. v1 files are read via a migration (§3.2 -> §3.8). */
+const VERSION = 2
+
+/** The oldest schema version this module still reads. */
+const MIN_READABLE_VERSION = 1
 
 /** MIDI 7-bit range, shared by `pitch`, `vel`, `defaultVel` and `colVel` values. */
 const MIDI_MAX = 127
@@ -65,12 +75,51 @@ function writePos(p: Pos): unknown {
   return { col: p.col, frac: writeFrac(p.frac) }
 }
 
-function writeSubdiv(sd: Subdiv): unknown {
-  if (sd.children === undefined) return { split: sd.split }
-  return {
-    split: sd.split,
-    children: sd.children.map((c) => (c === null ? null : { split: c.split })),
+function writeGridRegion(r: GridRegion): unknown {
+  return { start: writePos(r.start), value: writeFrac(r.value) }
+}
+
+/**
+ * A layer's `grid` is already canonical (§3.2): sorted by `start`, no duplicate
+ * starts, every value on the §3.1 lattice and in the §3.1 range. Writing therefore
+ * only asserts those invariants rather than repairing them — a caller that hands in
+ * an unsorted list, or a value `readGrid` would reject, has a bug. Silently sorting
+ * would hide the first; skipping the value check would let an unopenable file reach
+ * disk, since autosave writes without ever reading the bytes back (§10) — the write
+ * that produced it would look like it succeeded right up until the next reload.
+ */
+function writeGrid(regions: readonly GridRegion[], where: string): unknown[] {
+  for (let i = 0; i < regions.length; i++) {
+    const region = regions[i]!
+    validateGridValue(region.value, `${where}[${i}].value`)
+    if (i > 0 && pcmp(regions[i - 1]!.start, region.start) >= 0) {
+      throw new Error(`Project: ${where} is not sorted into canonical order — this is a bug`)
+    }
   }
+  return regions.map(writeGridRegion)
+}
+
+function writeMeter(m: Meter): unknown {
+  return { pos: writePos(m.pos), beatUnit: writeFrac(m.beatUnit), groups: [...m.groups] }
+}
+
+/**
+ * `meterMap` is already canonical by the time it reaches here (§3.7, `buildMeterMap`'s
+ * invariant): sorted by `pos`, anchored at or before the origin. Writing therefore only
+ * *asserts* that order and validates each meter's legality on the way out, mirroring
+ * `writeGrid`'s precedent immediately above — silently re-sorting would hide a caller
+ * bug, and skipping the legality check would let an unopenable file reach disk, since
+ * autosave never reads the bytes back before writing them (§10).
+ */
+function writeMeterMap(map: readonly Meter[], where: string): unknown[] {
+  for (let i = 0; i < map.length; i++) {
+    const m = map[i]!
+    validateMeter(m, `${where}[${i}]`)
+    if (i > 0 && pcmp(map[i - 1]!.pos, m.pos) >= 0) {
+      throw new Error(`Project: ${where} is not sorted into canonical order — this is a bug`)
+    }
+  }
+  return map.map(writeMeter)
 }
 
 /** A `Map` as column-sorted `[[col, value], ...]` — the §10 entry-array form. */
@@ -105,7 +154,7 @@ function writeLayer(l: Layer): unknown {
     visible: l.visible,
     defaultVel: l.defaultVel,
     colVel: writeMap(l.colVel, (v) => v),
-    subdivs: writeMap(l.subdivs, writeSubdiv),
+    grid: writeGrid(l.grid, `layer "${l.id}" grid`),
     order: l.order,
   }
 }
@@ -116,6 +165,7 @@ export function serializeProject(p: Project): unknown {
     version: p.version,
     name: p.name,
     tempoMap: p.tempoMap.map((e) => ({ pos: writePos(e.pos), bpm: e.bpm })),
+    meterMap: writeMeterMap(p.meterMap, 'meterMap'),
     layers: p.layers.map(writeLayer),
     notes: p.notes.map(writeNote),
     activeLayerId: p.activeLayerId,
@@ -261,8 +311,52 @@ function readSubdiv(v: unknown, where: string): Subdiv {
   return guard(where, 'is not a valid subdivision', () => validateSubdiv(v))
 }
 
-function readLayer(v: unknown, where: string): Layer {
-  const o = requireObject(v, where)
+/**
+ * `[{start, value}, ...]` back into a `GridRegion[]` (§3.8).
+ *
+ * Regions must already be canonical on disk: sorted by `start`, with no two regions
+ * sharing a start. Both are rejected here rather than repaired, for the same reason
+ * `readPos` rejects a non-canonical position — silently reordering or dropping one
+ * would move the user's grid without telling them.
+ */
+function readGrid(v: unknown, where: string): GridRegion[] {
+  const raw = requireArray(v, where)
+  const out: GridRegion[] = []
+  for (let i = 0; i < raw.length; i++) {
+    const o = requireObject(raw[i], `${where}[${i}]`)
+    const start = readPos(o.start, `${where}[${i}].start`)
+    const value = validateGridValue(o.value, `${where}[${i}].value`)
+    const prev = out[out.length - 1]
+    if (prev !== undefined) {
+      const order = pcmp(prev.start, start)
+      if (order === 0) fail(`${where}[${i}].start`, 'duplicates the previous region\'s start')
+      if (order > 0) fail(`${where}[${i}].start`, 'is out of order relative to the previous region')
+    }
+    out.push({ start, value })
+  }
+  return out
+}
+
+/**
+ * `[{pos, beatUnit, groups}, ...]` back into a `Meter[]`, routed through
+ * `buildMeterMap` (§3.7). `validateMeter` checks each entry's own shape (a canonical
+ * `pos`, a positive power-of-two-denominator `beatUnit`, non-empty positive
+ * `groups`) but says nothing about the list as a whole; `buildMeterMap` is what
+ * establishes the anchoring invariant every bar-arithmetic function in `meter.ts`
+ * requires — `map[0].pos` at or before the origin — by prepending `DEFAULT_METER`
+ * when the first entry starts late. Skipping this step and handing the raw parsed
+ * array straight to `barLinesIn` / `groupLinesIn` / `barNumberAt` would make a v2 file
+ * whose `meterMap` begins after col 0 throw a `RangeError` from a draw path instead of
+ * failing (or loading) cleanly right here at the import boundary.
+ */
+function readMeterMap(v: unknown, where: string): readonly Meter[] {
+  const raw = requireArray(v, where)
+  const events = raw.map((e, i) => validateMeter(e, `${where}[${i}]`))
+  return guard(where, 'is not a valid meter map', () => buildMeterMap(events))
+}
+
+/** Fields shared by every `.go.json` version. */
+function readLayerCommon(o: Record<string, unknown>, where: string) {
   return {
     id: requireString(o.id, `${where}.id`),
     name: requireString(o.name, `${where}.name`),
@@ -275,9 +369,21 @@ function readLayer(v: unknown, where: string): Layer {
     colVel: readMap(o.colVel, `${where}.colVel`, (raw, at) =>
       requireIntInRange(raw, at, 0, MIDI_MAX),
     ),
-    subdivs: readMap(o.subdivs, `${where}.subdivs`, readSubdiv),
     order: requireInt(o.order, `${where}.order`),
   }
+}
+
+/** v2 layer: `grid` is read directly. */
+function readLayerV2(v: unknown, where: string): Layer {
+  const o = requireObject(v, where)
+  return { ...readLayerCommon(o, where), grid: readGrid(o.grid, `${where}.grid`) }
+}
+
+/** v1 layer: `subdivs` is read the old way, then migrated to regions (§3.2 -> §3.8). */
+function readLayerV1(v: unknown, where: string): Layer {
+  const o = requireObject(v, where)
+  const subdivs = readMap(o.subdivs, `${where}.subdivs`, readSubdiv)
+  return { ...readLayerCommon(o, where), grid: subdivsToRegions(subdivs) }
 }
 
 function readNote(v: unknown, where: string, layerIds: ReadonlySet<LayerId>): Note {
@@ -311,10 +417,11 @@ function readTempoEvent(v: unknown, where: string): TempoEvent {
  */
 export function deserializeProject(raw: unknown): Project {
   const o = requireObject(raw, 'root')
-  if (o.version !== VERSION) {
+  if (o.version !== VERSION && o.version !== MIN_READABLE_VERSION) {
     const got = typeof o.version === 'number' ? o.version : describe(o.version)
-    fail('version', `must be ${VERSION}, got ${got}`)
+    fail('version', `must be ${MIN_READABLE_VERSION} or ${VERSION}, got ${got}`)
   }
+  const readLayer = o.version === MIN_READABLE_VERSION ? readLayerV1 : readLayerV2
   const name = requireString(o.name, 'name')
   const activeLayerId = requireString(o.activeLayerId, 'activeLayerId')
 
@@ -351,8 +458,12 @@ export function deserializeProject(raw: unknown): Project {
   // the built map is discarded because §4.1 says runtime structures are not persisted.
   guard('tempoMap', 'is not a valid tempo map', () => buildTempoMap(tempoMap))
 
+  // No `meterMap` key means one 4/4 at the origin (§3.7) — the same default
+  // `DEFAULT_METER` and `buildMeterMap` give an empty list.
+  const meterMap = o.meterMap === undefined ? [DEFAULT_METER] : readMeterMap(o.meterMap, 'meterMap')
+
   if (o.loop === undefined) {
-    return { version: VERSION, name, tempoMap, layers, notes, activeLayerId }
+    return { version: VERSION, name, tempoMap, layers, notes, activeLayerId, meterMap }
   }
 
   const loopRaw = requireObject(o.loop, 'loop')
@@ -364,7 +475,7 @@ export function deserializeProject(raw: unknown): Project {
   if (!plt(loop.start, loop.end)) {
     fail('loop', `start must be before end, got col ${loop.start.col} .. col ${loop.end.col}`)
   }
-  return { version: VERSION, name, tempoMap, layers, notes, activeLayerId, loop }
+  return { version: VERSION, name, tempoMap, layers, notes, activeLayerId, meterMap, loop }
 }
 
 /**
@@ -427,10 +538,11 @@ export function createEmptyProject(): Project {
       visible: true,
       defaultVel: INIT_VEL,
       colVel: new Map<number, number>(),
-      subdivs: new Map<number, Subdiv>(),
+      grid: [],
       order,
     })),
     notes: [],
     activeLayerId: STARTER_LAYERS[0]!.id,
+    meterMap: [DEFAULT_METER],
   }
 }

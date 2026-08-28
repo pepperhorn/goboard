@@ -1,3 +1,6 @@
+import type { GridRegion } from './grid'
+import type { Meter } from './meter'
+
 /** Canonical time and project types. See go-spec.md §3–§4. */
 
 /** A rational number, always gcd-normalized with `d > 0`. Zero is always `{n:0,d:1}`. */
@@ -38,8 +41,7 @@ export type Note = {
 
 /**
  * One layer: an instrument, its board appearance, and the per-column state (§4).
- * `colVel` and `subdivs` are keyed by `col`; an absent entry means the layer default
- * (`defaultVel`, and `{split:1}` — one slot per quarter).
+ * `colVel` is keyed by `col`; an absent entry means the layer default (`defaultVel`).
  */
 export type Layer = {
   readonly id: LayerId
@@ -53,18 +55,21 @@ export type Layer = {
   readonly visible: boolean
   readonly defaultVel: number
   readonly colVel: Map<number, number>
-  readonly subdivs: Map<number, Subdiv>
+  /** Rhythmic grid: sorted regions, empty means one line per quarter. See design §3.2. */
+  readonly grid: readonly GridRegion[]
   /** Z-order in the layer panel and draw order. */
   readonly order: number
 }
 
 /** A whole project — the storage form. Runtime indexes (§4.1) are rebuilt on load. */
 export type Project = {
-  readonly version: 1
+  readonly version: 2
   readonly name: string
   readonly tempoMap: readonly TempoEvent[]
   readonly layers: readonly Layer[]
   readonly notes: readonly Note[]
   readonly activeLayerId: LayerId
+  /** Bar lines, bar numbers and MIDI time signatures: sorted by `pos`. See design §3.7. */
+  readonly meterMap: readonly Meter[]
   readonly loop?: { readonly start: Pos; readonly end: Pos }
 }

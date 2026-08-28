@@ -1,15 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { Subdiv, SubdivL2 } from './types'
 import { ONE, add, frac, lt, toString } from './frac'
-import {
-  MAX_SLOTS,
-  MAX_SPLIT,
-  enumerateSlots,
-  slotAt,
-  slotCount,
-  slotIndexAt,
-  validateSubdiv,
-} from './subdiv'
+import { MAX_SLOTS, MAX_SPLIT, enumerateSlots, validateSubdiv } from './subdiv'
 
 /** The §3.2 worked example: 16ths with triplet 32nds on the last 16th. */
 const WORKED: Subdiv = { split: 4, children: [null, null, null, { split: 3 }] }
@@ -122,92 +114,12 @@ describe('enumerateSlots', () => {
   })
 })
 
-describe('slotCount', () => {
-  it('matches enumerateSlots().length without materializing the array', () => {
-    const cases: (Subdiv | undefined)[] = [
-      undefined,
-      { split: 1 },
-      { split: 16 },
-      WORKED,
-      withChild(13, 5, { split: 11 }),
-      withChild(11, 10, { split: 13 }),
-      MAXIMAL,
-    ]
-    for (const sd of cases) {
-      expect(slotCount(sd)).toBe(enumerateSlots(sd).length)
-    }
-    expect(slotCount(undefined)).toBe(1)
-    expect(slotCount(WORKED)).toBe(6)
-    expect(slotCount(MAXIMAL)).toBe(MAX_SLOTS)
-  })
-})
-
-describe('slotIndexAt', () => {
-  it('resolves offsets in the default single-slot column', () => {
-    expect(slotIndexAt(undefined, frac(0))).toBe(0)
-    expect(slotIndexAt(undefined, frac(1, 2))).toBe(0)
-    expect(slotIndexAt(undefined, frac(255, 256))).toBe(0)
-  })
-
-  it('treats slot spans as half-open: a boundary belongs to the slot it starts', () => {
-    expect(slotIndexAt(WORKED, frac(0))).toBe(0)
-    expect(slotIndexAt(WORKED, frac(1, 8))).toBe(0)
-    expect(slotIndexAt(WORKED, frac(1, 4))).toBe(1)
-    expect(slotIndexAt(WORKED, frac(1, 2))).toBe(2)
-    expect(slotIndexAt(WORKED, frac(3, 4))).toBe(3)
-    expect(slotIndexAt(WORKED, add(frac(3, 4), frac(1, 12)))).toBe(4)
-    expect(slotIndexAt(WORKED, add(frac(3, 4), frac(2, 12)))).toBe(5)
-    expect(slotIndexAt(WORKED, frac(99, 100))).toBe(5)
-  })
-
-  it('lands every slot on its own index, for every tree', () => {
-    for (const sd of [undefined, WORKED, withChild(13, 5, { split: 11 }), MAXIMAL]) {
-      const slots = enumerateSlots(sd)
-      slots.forEach((s, i) => {
-        expect(slotIndexAt(sd, s.start)).toBe(i)
-        // Just inside the slot, and just short of its end.
-        const mid = add(s.start, frac(s.dur.n, s.dur.d * 2))
-        expect(slotIndexAt(sd, mid)).toBe(i)
-      })
-    }
-  })
-
-  it('returns -1 outside [0, 1)', () => {
-    expect(slotIndexAt(WORKED, frac(-1, 4))).toBe(-1)
-    expect(slotIndexAt(WORKED, frac(1))).toBe(-1)
-    expect(slotIndexAt(WORKED, frac(5, 4))).toBe(-1)
-    expect(slotIndexAt(undefined, frac(-1, 256))).toBe(-1)
-  })
-})
-
-describe('slotAt', () => {
-  it('returns the containing slot', () => {
-    expect(slotAt(undefined, frac(1, 3))).toEqual({ start: frac(0), dur: frac(1) })
-    expect(slotAt(WORKED, frac(1, 4))).toEqual({ start: frac(1, 4), dur: frac(1, 4) })
-    expect(slotAt(WORKED, frac(7, 8))).toEqual({ start: frac(5, 6), dur: frac(1, 12) })
-  })
-
-  it('agrees with enumerateSlots for every tree', () => {
-    for (const sd of [undefined, WORKED, withChild(11, 10, { split: 13 }), MAXIMAL]) {
-      const slots = enumerateSlots(sd)
-      slots.forEach((s) => {
-        expect(slotAt(sd, s.start)).toEqual(s)
-      })
-    }
-  })
-
-  it('returns undefined outside [0, 1)', () => {
-    expect(slotAt(WORKED, frac(1))).toBeUndefined()
-    expect(slotAt(WORKED, frac(-1, 12))).toBeUndefined()
-  })
-})
-
 describe('validateSubdiv', () => {
   it('accepts the default, the worked example and the 256-slot maximum', () => {
     expect(validateSubdiv({ split: 1 })).toEqual({ split: 1 })
     expect(validateSubdiv({ split: 16 })).toEqual({ split: 16 })
     expect(validateSubdiv(WORKED)).toEqual(WORKED)
-    expect(slotCount(validateSubdiv(MAXIMAL))).toBe(MAX_SLOTS)
+    expect(enumerateSlots(validateSubdiv(MAXIMAL)).length).toBe(MAX_SLOTS)
   })
 
   it('rebuilds the tree, dropping properties the type does not carry', () => {

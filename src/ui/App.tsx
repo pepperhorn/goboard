@@ -16,7 +16,7 @@ import { BoardView } from './BoardView'
 import { FileMenu } from './FileMenu'
 import { Inspector } from './Inspector'
 import { LayerPanel } from './LayerPanel'
-import { SubdivMenu } from './SubdivMenu'
+import { GridMenu } from './GridMenu'
 import { Transport } from './Transport'
 import { VelocityLane } from './VelocityLane'
 import type { LaneApi } from './VelocityLane'
@@ -332,7 +332,7 @@ export function App(): React.ReactElement {
     uiSet({ selectedNoteId: id })
   }, [])
 
-  const onSubdivMenu = useCallback((col: number, x: number, y: number) => {
+  const onGridMenu = useCallback((col: number, x: number, y: number) => {
     setMenu({ col, x, y })
   }, [])
 
@@ -365,7 +365,7 @@ export function App(): React.ReactElement {
           onSeek={seek}
           onToggleTransport={toggleTransport}
           playheadRef={playheadRef}
-          onSubdivMenu={onSubdivMenu}
+          onGridMenu={onGridMenu}
           laneRef={laneRef}
         />
         {audio === 'locked' && (
@@ -385,9 +385,13 @@ export function App(): React.ReactElement {
       </div>
 
       {menu && (
-        <SubdivMenu
+        <GridMenu
           board={board}
-          col={menu.col}
+          layerId={board.activeLayer().id}
+          from={pos(menu.col)}
+          /* Default range: the clicked column to the next. The bar containing the
+             click needs the meter map, which is not built yet. */
+          to={pos(menu.col + 1)}
           x={menu.x}
           y={menu.y}
           onClose={() => setMenu(null)}

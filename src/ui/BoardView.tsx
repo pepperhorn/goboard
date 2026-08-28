@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef } from 'react'
 import type { Layer, LayerId, Note, NoteId } from '../core/types'
 import { toNumber } from '../core/frac'
+import { buildMeterMap } from '../core/meter'
 import { toQuarters } from '../core/pos'
 import { StoneAtlas } from '../board/atlas'
 import { FrameLoop, makeSurface, sizeSurface } from '../board/canvasHost'
@@ -9,6 +10,7 @@ import type { Surface } from '../board/canvasHost'
 import { drawGridlines, drawRows } from '../board/grid'
 import { GUTTER_WIDTH, drawGutter } from '../board/gutter'
 import { BoardInteraction } from '../board/interaction'
+import { markerAt, markerCenterX, quantizeMeterDrop } from '../board/meterMarkers'
 import { RULER_HEIGHT, drawRuler } from '../board/ruler'
 import { drawStones } from '../board/stones'
 import type { StoneRegion } from '../board/stones'
@@ -73,7 +75,7 @@ export type BoardViewProps = {
   readonly onToggleTransport: () => void
   /** Absolute playhead position in quarters while playing, else null. */
   readonly playheadRef: { current: number | null }
-  readonly onSubdivMenu: (col: number, clientX: number, clientY: number) => void
+  readonly onGridMenu: (col: number, clientX: number, clientY: number) => void
   /**
    * The velocity lane's imperative draw hook. §5.3 allows exactly one rAF owner, so
    * the lane registers here instead of running its own loop.
@@ -122,6 +124,13 @@ export function BoardView(props: BoardViewProps): React.ReactElement {
     let drawnVp: Viewport | null = null
     let drawnCommit = -1
 
+    /**
+     * The meter marker being dragged, or `null`. Declared up here rather than beside
+     * the ruler handlers because `frame` reads it, and `frame` runs from the rAF loop
+     * that starts before those handlers are installed.
+     */
+    let markerDrag: { index: number; grabDx: number; quarters: number } | null = null
+
     const interaction = new BoardInteraction({
       board,
       size: () => main.size,
@@ -145,6 +154,10 @@ export function BoardView(props: BoardViewProps): React.ReactElement {
       const vp = board.getViewport()
       const project = board.getProject()
       const active = board.activeLayer()
+      // Already built, and rebuilt only when a meter command commits (§3.7): the store
+      // owns it so that the map this frame draws and the map a marker index refers to
+      // are the same list.
+      const meterMap = board.getMeterMap()
 
       /*
        * §5.3: radius buckets shift with zoom, so the atlas is rebuilt "on zoom-end" —
@@ -178,14 +191,14 @@ export function BoardView(props: BoardViewProps): React.ReactElement {
           main.ctx.clip()
         }
         drawRows(main.ctx, v, main.size)
-        drawGridlines(main.ctx, v, main.size, (col) => active.subdivs.get(col), dpr)
+        drawGridlines(main.ctx, v, main.size, board.gridFor(active.id), meterMap, dpr)
         drawStones(
           main.ctx, v, main.size, atlas,
           {
             index: board.getIndex(),
             layers: board.drawOrder(),
             activeLayerId: active.id,
-            subdivFor: (layerId, col) => board.subdivFor(layerId, col),
+            gridFor: (layerId) => board.gridFor(layerId),
             isKit: (layerId) => propsRef.current.isKit(layerId),
             maxDurQuarters: board.maxDur(),
           },
@@ -243,9 +256,12 @@ export function BoardView(props: BoardViewProps): React.ReactElement {
       )
 
       const playhead = propsRef.current.playheadRef.current
-      drawRuler(ruler.ctx, boardVp, ruler.size, {
+      drawRuler(ruler.ctx, boardVp, ruler.size, meterMap, {
         loop: project.loop,
         playheadQuarters: playhead ?? undefined,
+        meterDrag: markerDrag
+          ? { index: markerDrag.index, quarters: markerDrag.quarters }
+          : undefined,
       })
 
       // Overlay: playhead line and hover ghost only.
@@ -333,16 +349,50 @@ export function BoardView(props: BoardViewProps): React.ReactElement {
     boardCanvas.addEventListener('wheel', onWheel, { passive: false })
     boardCanvas.addEventListener('contextmenu', onContext)
 
-    // Ruler: click seeks, drag sets the loop, shift-click clears, right-click
-    // opens the subdivision editor (§7.2).
+    /*
+     * Ruler: click seeks, drag sets the loop, shift-click clears, right-click opens
+     * the grid editor (§7.2) — and, from Task 13, the top `MARKER_BAND_HEIGHT` pixels
+     * belong to the meter markers.
+     *
+     * Hit priority is the whole design here. `markerAt` is tested FIRST and returns
+     * `null` for every y at or below the band, so the four gestures above reach
+     * exactly the code they always did, by the same path, for the whole of the ruler
+     * except a 12px strip at the top.
+     */
     let loopAnchor: number | null = null
     const onRulerDown = (e: PointerEvent) => {
-      const { x } = local(rulerCanvas, e)
+      const { x, y } = local(rulerCanvas, e)
       const vp = board.getViewport()
       const q = xToQuarters(vp, x)
+
+      const hit = markerAt(vp, board.getMeterMap(), x, y)
+      if (hit !== null) {
+        e.preventDefault()
+        if (e.button === 2) {
+          // Index 0 anchors the map at or before the origin, so it cannot be removed
+          // (`BoardStore.removeMeter` refuses it). Opening the grid editor instead
+          // keeps the opening time signature editable rather than leaving a dead chip.
+          if (hit === 0) propsRef.current.onGridMenu(Math.floor(q), e.clientX, e.clientY)
+          else board.removeMeter(hit)
+          return
+        }
+        if (e.button !== 0) return
+        if (hit === 0) return // the anchor meter never moves — see `moveMeter`
+        rulerCanvas.setPointerCapture(e.pointerId)
+        const m = board.getMeterMap()[hit]!
+        // The grab offset keeps the chip from jumping to the pointer on the first move.
+        markerDrag = {
+          index: hit,
+          grabDx: x - markerCenterX(vp, m),
+          quarters: toQuarters(m.pos),
+        }
+        board.touch()
+        return
+      }
+
       if (e.button === 2) {
         e.preventDefault()
-        propsRef.current.onSubdivMenu(Math.floor(q), e.clientX, e.clientY)
+        propsRef.current.onGridMenu(Math.floor(q), e.clientX, e.clientY)
         return
       }
       if (e.button !== 0) return
@@ -355,6 +405,13 @@ export function BoardView(props: BoardViewProps): React.ReactElement {
       loopAnchor = q
     }
     const onRulerMove = (e: PointerEvent) => {
+      if (markerDrag !== null) {
+        const { x } = local(rulerCanvas, e)
+        const at = xToQuarters(board.getViewport(), x - markerDrag.grabDx)
+        markerDrag = { ...markerDrag, quarters: at }
+        board.touch()
+        return
+      }
       if (loopAnchor === null) return
       const { x } = local(rulerCanvas, e)
       const q = xToQuarters(board.getViewport(), x)
@@ -366,6 +423,16 @@ export function BoardView(props: BoardViewProps): React.ReactElement {
     }
     const onRulerUp = (e: PointerEvent) => {
       if (rulerCanvas.hasPointerCapture(e.pointerId)) rulerCanvas.releasePointerCapture(e.pointerId)
+      if (markerDrag !== null) {
+        const drag = markerDrag
+        markerDrag = null
+        // The landing is quantized against the map *without* the dragged meter, so the
+        // bar lines it snaps to are the ones the surrounding meter would have drawn.
+        const rest = buildMeterMap(board.getMeterMap().filter((_, i) => i !== drag.index))
+        board.moveMeter(drag.index, quantizeMeterDrop(rest, drag.quarters))
+        board.touch()
+        return
+      }
       if (loopAnchor === null) return
       const { x } = local(rulerCanvas, e)
       const q = xToQuarters(board.getViewport(), x)
@@ -375,9 +442,18 @@ export function BoardView(props: BoardViewProps): React.ReactElement {
       loopAnchor = null
     }
 
+    /** A cancelled gesture commits nothing — the chip snaps back where it was. */
+    const onRulerCancel = (e: PointerEvent) => {
+      if (rulerCanvas.hasPointerCapture(e.pointerId)) rulerCanvas.releasePointerCapture(e.pointerId)
+      markerDrag = null
+      loopAnchor = null
+      board.touch()
+    }
+
     rulerCanvas.addEventListener('pointerdown', onRulerDown)
     rulerCanvas.addEventListener('pointermove', onRulerMove)
     rulerCanvas.addEventListener('pointerup', onRulerUp)
+    rulerCanvas.addEventListener('pointercancel', onRulerCancel)
     rulerCanvas.addEventListener('contextmenu', onContext)
 
     return () => {
@@ -393,6 +469,7 @@ export function BoardView(props: BoardViewProps): React.ReactElement {
       rulerCanvas.removeEventListener('pointerdown', onRulerDown)
       rulerCanvas.removeEventListener('pointermove', onRulerMove)
       rulerCanvas.removeEventListener('pointerup', onRulerUp)
+      rulerCanvas.removeEventListener('pointercancel', onRulerCancel)
       rulerCanvas.removeEventListener('contextmenu', onContext)
       interactionRef.current = null
     }
@@ -424,12 +501,12 @@ export function BoardView(props: BoardViewProps): React.ReactElement {
       return
     }
     if (/^[0-9]$/.test(e.key) && !e.ctrlKey && !e.metaKey) {
-      if (interaction.quickSplit(Number(e.key), false)) e.preventDefault()
+      if (interaction.quickGrid(Number(e.key), false)) e.preventDefault()
       return
     }
-    // Shift+1..6 reaches splits 11–16 (§7.2); the shifted key is a symbol.
+    // Shift+1..6 reaches 1/11–1/16 (§7.2); the shifted key is a symbol.
     const shifted = ['!', '@', '#', '$', '%', '^'].indexOf(e.key)
-    if (shifted >= 0 && interaction.quickSplit(shifted + 1, true)) e.preventDefault()
+    if (shifted >= 0 && interaction.quickGrid(shifted + 1, true)) e.preventDefault()
   }, [board])
 
   useEffect(() => {

@@ -2,6 +2,10 @@ import { describe, expect, it } from 'vitest'
 import type { Layer, Note, Project, Subdiv } from '../core/types'
 import { frac } from '../core/frac'
 import { pos } from '../core/pos'
+import { DEFAULT_METER } from '../core/meter'
+import { enumerateSlots } from '../core/subdiv'
+import { slotStartsIn } from '../core/grid'
+import { BoardStore } from '../state/boardStore'
 import {
   PROJECT_FILE_EXT,
   createEmptyProject,
@@ -11,9 +15,6 @@ import {
   projectToBlobString,
   serializeProject,
 } from './project'
-
-/** The §3.2 worked example: 16ths with triplet 32nds on the last 16th. */
-const WORKED: Subdiv = { split: 4, children: [null, null, null, { split: 3 }] }
 
 function mkLayer(over: Partial<Layer> & Pick<Layer, 'id'>): Layer {
   return {
@@ -25,7 +26,7 @@ function mkLayer(over: Partial<Layer> & Pick<Layer, 'id'>): Layer {
     visible: true,
     defaultVel: 96,
     colVel: new Map(),
-    subdivs: new Map(),
+    grid: [],
     order: 0,
     ...over,
   }
@@ -33,11 +34,11 @@ function mkLayer(over: Partial<Layer> & Pick<Layer, 'id'>): Layer {
 
 /**
  * A project that exercises every feature the format has to carry: three layers, notes
- * at negative columns, an off-quarter onset, a nested subdivision, out-of-order map
+ * at negative columns, an off-quarter onset, a non-trivial grid, out-of-order map
  * entries, a velocity override and a loop region.
  */
 const FIXTURE: Project = {
-  version: 1,
+  version: 2,
   name: 'Fixture',
   tempoMap: [
     { pos: pos(0), bpm: 120 },
@@ -52,10 +53,12 @@ const FIXTURE: Project = {
         [-2, 40],
         [0, 96],
       ]),
-      subdivs: new Map<number, Subdiv>([
-        [3, { split: 5 }],
-        [-1, WORKED],
-      ]),
+      // Regions must already be in canonical (sorted, no-duplicate-start) order —
+      // that invariant is exercised, not violated, here.
+      grid: [
+        { start: pos(-1), value: frac(1, 3) },
+        { start: pos(3), value: frac(1, 5) },
+      ],
     }),
     mkLayer({ id: 'L2', color: '#27ae60', channel: 2, audible: false, order: 1 }),
     mkLayer({ id: 'L3', color: '#eb5757', channel: 9, visible: false, order: 2 }),
@@ -66,6 +69,7 @@ const FIXTURE: Project = {
     { id: 'n3', layerId: 'L2', pos: pos(-1, 3, 4), dur: frac(1, 4), pitch: 36, vel: 0 },
   ],
   activeLayerId: 'L1',
+  meterMap: [DEFAULT_METER],
   loop: { start: pos(-4), end: pos(8, 1, 2) },
 }
 
@@ -82,13 +86,51 @@ function expectReject(raw: unknown, names: RegExp): void {
   expect(() => deserializeProject(raw)).toThrow(names)
 }
 
+/**
+ * A minimal v1 `.go.json` file, plain JSON (no `Frac`/`Map` to build) since v1 is only
+ * ever read, never written. Two subdiv columns, so a duplicate-column corruption has
+ * something to collide with.
+ */
+const V1_FIXTURE = {
+  version: 1,
+  name: 'Old',
+  tempoMap: [{ pos: { col: 0, frac: { n: 0, d: 1 } }, bpm: 120 }],
+  layers: [
+    {
+      id: 'l1',
+      name: 'Piano',
+      color: '#c33',
+      instrumentId: 'ph-piano-1',
+      channel: 0,
+      audible: true,
+      visible: true,
+      defaultVel: 96,
+      order: 0,
+      colVel: [],
+      subdivs: [
+        [2, { split: 3 }],
+        [5, { split: 1 }],
+      ],
+    },
+  ],
+  notes: [],
+  activeLayerId: 'l1',
+}
+
+/** A deep-cloned `V1_FIXTURE` with one field broken. */
+function corruptV1(mutate: (raw: any) => void): unknown {
+  const raw = JSON.parse(JSON.stringify(V1_FIXTURE))
+  mutate(raw)
+  return raw
+}
+
 describe('round trip', () => {
   it('restores a non-trivial project exactly, Maps included', () => {
     const back = deserializeProject(serializeProject(FIXTURE))
     expect(back).toEqual(FIXTURE)
     expect(back.layers[0]!.colVel).toBeInstanceOf(Map)
     expect(back.layers[0]!.colVel.get(-2)).toBe(40)
-    expect(back.layers[0]!.subdivs.get(-1)).toEqual(WORKED)
+    expect(back.layers[0]!.grid).toEqual(FIXTURE.layers[0]!.grid)
     expect(back.notes[0]!.pos).toEqual(pos(-4, 1, 12))
     expect(back.loop).toEqual({ start: pos(-4), end: pos(8, 1, 2) })
   })
@@ -100,7 +142,7 @@ describe('round trip', () => {
     expect(projectToBlobString(projectFromString(twice))).toBe(once)
   })
 
-  it('sorts map entries by column, so insertion order cannot change the bytes', () => {
+  it('sorts colVel entries by column, so insertion order cannot change the bytes', () => {
     const ascending: Project = {
       ...FIXTURE,
       layers: FIXTURE.layers.map((l, i) =>
@@ -111,10 +153,6 @@ describe('round trip', () => {
                 [-2, 40],
                 [0, 96],
                 [4, 110],
-              ]),
-              subdivs: new Map<number, Subdiv>([
-                [-1, WORKED],
-                [3, { split: 5 }],
               ]),
             }
           : l,
@@ -127,7 +165,37 @@ describe('round trip', () => {
       [0, 96],
       [4, 110],
     ])
-    expect(raw.layers[0].subdivs.map((e: [number, unknown]) => e[0])).toEqual([-1, 3])
+  })
+
+  it('writes grid regions in list order rather than sorting them', () => {
+    // Unlike colVel, `grid` is a list, not a `Map`: it is written exactly as given.
+    // The fixture's regions are already canonical (sorted, no duplicate starts).
+    const raw = serializeProject(FIXTURE) as any
+    expect(raw.layers[0].grid.map((r: { start: { col: number } }) => r.start.col)).toEqual([
+      -1, 3,
+    ])
+  })
+
+  it('throws at write time rather than writing a file it cannot reopen', () => {
+    // A grid value that never passed through `readGrid` — built in-app, or handed to
+    // `serializeProject` directly — must fail loudly here. Otherwise autosave (which
+    // never reads its own bytes back) could write a project the app cannot reopen.
+    const p = createEmptyProject()
+    const offLattice: Project = {
+      ...p,
+      layers: p.layers.map((l, i) =>
+        i === 0 ? { ...l, grid: [{ start: pos(0), value: { n: 1, d: 17 } }] } : l,
+      ),
+    }
+    expect(() => serializeProject(offLattice)).toThrow(/lattice/)
+
+    const outOfRange: Project = {
+      ...p,
+      layers: p.layers.map((l, i) =>
+        i === 0 ? { ...l, grid: [{ start: pos(0), value: frac(8) }] } : l,
+      ),
+    }
+    expect(() => serializeProject(outOfRange)).toThrow(/between 1\/256 and 4/)
   })
 
   it('omits absent optionals rather than writing nulls', () => {
@@ -162,9 +230,9 @@ describe('deserializeProject rejections', () => {
     expectReject('{}', /Project: root/)
   })
 
-  it('rejects any version but 1', () => {
+  it('rejects any version but 1 or 2', () => {
     expectReject(
-      corrupt((r) => (r.version = 2)),
+      corrupt((r) => (r.version = 3)),
       /version/,
     )
     expectReject(
@@ -347,24 +415,29 @@ describe('deserializeProject rejections', () => {
     )
   })
 
-  it('rejects a malformed subdivision through validateSubdiv', () => {
+  it('rejects a malformed grid region through validateGridValue', () => {
     expectReject(
-      corrupt((r) => (r.layers[0].subdivs[1][1] = { split: 5, children: [null, null] })),
-      /layers\[0\]\.subdivs\[3\]/,
+      corrupt((r) => (r.layers[0].grid[0] = { start: r.layers[0].grid[0].start })),
+      /layers\[0\]\.grid\[0\]\.value/,
     )
     expectReject(
-      corrupt((r) => (r.layers[0].subdivs[0][1] = { split: 17 })),
-      /layers\[0\]\.subdivs\[-1\]/,
+      corrupt((r) => (r.layers[0].grid[1].value = { n: 1.5, d: 2 })),
+      /layers\[0\]\.grid\[1\]\.value/,
     )
     expectReject(
-      corrupt(
-        (r) =>
-          (r.layers[0].subdivs[0][1] = {
-            split: 1,
-            children: [{ split: 2, children: [null, null] }],
-          }),
-      ),
-      /layers\[0\]\.subdivs\[-1\]/,
+      corrupt((r) => (r.layers[0].grid[0] = 'nope')),
+      /layers\[0\]\.grid\[0\]/,
+    )
+  })
+
+  it('rejects a grid region out of order relative to its predecessor', () => {
+    expectReject(
+      corrupt((r) => {
+        const tmp = r.layers[0].grid[0]
+        r.layers[0].grid[0] = r.layers[0].grid[1]
+        r.layers[0].grid[1] = tmp
+      }),
+      /layers\[0\]\.grid\[1\]\.start/,
     )
   })
 
@@ -388,10 +461,6 @@ describe('deserializeProject rejections', () => {
     expectReject(
       corrupt((r) => (r.layers[0].colVel[1][0] = -2)),
       /layers\[0\]\.colVel.*-2/,
-    )
-    expectReject(
-      corrupt((r) => (r.layers[0].subdivs[1][0] = -1)),
-      /layers\[0\]\.subdivs.*-1/,
     )
   })
 
@@ -496,12 +565,12 @@ describe('createEmptyProject', () => {
     expect(p.layers.map((l) => l.order)).toEqual([0, 1, 2, 3])
     expect(p.layers.every((l) => l.defaultVel === 96)).toBe(true)
     expect(p.layers.every((l) => l.audible && l.visible)).toBe(true)
-    expect(p.layers.every((l) => l.colVel.size === 0 && l.subdivs.size === 0)).toBe(true)
+    expect(p.layers.every((l) => l.colVel.size === 0 && l.grid.length === 0)).toBe(true)
   })
 
   it('starts empty, at 120 BPM from col 0, with Piano active and no loop', () => {
     const p = createEmptyProject()
-    expect(p.version).toBe(1)
+    expect(p.version).toBe(2)
     expect(p.notes).toEqual([])
     expect(p.tempoMap).toEqual([{ pos: pos(0), bpm: 120 }])
     expect(p.activeLayerId).toBe(p.layers[0]!.id)
@@ -527,5 +596,248 @@ describe('createEmptyProject', () => {
       pitch: 48 + i,
     }))
     expect(deserializeProject(serializeProject({ ...p, notes }))).toEqual({ ...p, notes })
+  })
+})
+
+describe('format v2 — grid regions (design doc §3.8)', () => {
+  it('round-trips a layer grid', () => {
+    const p = createEmptyProject()
+    const withGrid: Project = {
+      ...p,
+      layers: p.layers.map((l, i) =>
+        i === 0 ? { ...l, grid: [{ start: pos(4), value: frac(1, 3) }] } : l,
+      ),
+    }
+    const back = projectFromString(projectToBlobString(withGrid))
+    expect(back.layers[0]!.grid).toEqual([{ start: pos(4), value: frac(1, 3) }])
+  })
+
+  it('serializes identically for equal projects, so autosave does not churn', () => {
+    const a = createEmptyProject()
+    const b = createEmptyProject()
+    const grid = [{ start: pos(2), value: frac(1, 6) }, { start: pos(3), value: frac(1) }]
+    const withA: Project = { ...a, layers: a.layers.map((l) => ({ ...l, grid })) }
+    const withB: Project = { ...b, layers: b.layers.map((l) => ({ ...l, grid: [...grid] })) }
+    expect(projectToBlobString(withA)).toBe(projectToBlobString(withB))
+  })
+
+  it('reads a v1 file and migrates its subdivisions', () => {
+    const v1 = {
+      version: 1,
+      name: 'Old',
+      tempoMap: [{ pos: { col: 0, frac: { n: 0, d: 1 } }, bpm: 120 }],
+      layers: [{
+        id: 'l1', name: 'Piano', color: '#c33', instrumentId: 'ph-piano-1', channel: 0,
+        audible: true, visible: true, defaultVel: 96, order: 0,
+        colVel: [], subdivs: [[2, { split: 3 }]],
+      }],
+      notes: [],
+      activeLayerId: 'l1',
+    }
+    const migrated = projectFromString(JSON.stringify(v1))
+    expect(migrated.version).toBe(2)
+    expect(migrated.layers[0]!.grid).toEqual([
+      { start: pos(2), value: frac(1, 3) },
+      { start: pos(3), value: frac(1) },
+    ])
+  })
+
+  it('migrates several layers losslessly: nested trees, negative columns, a no-op', () => {
+    // The §3.2 worked example: 16ths with a triplet 32nd nest on the last 16th.
+    const nested: Subdiv = { split: 4, children: [null, null, null, { split: 3 }] }
+    const nested2: Subdiv = { split: 2, children: [{ split: 3 }, null] }
+    const flat: Subdiv = { split: 5 }
+    const noOp: Subdiv = { split: 1 } // an explicit no-op entry: same as no entry at all
+
+    const layerSubdivs = new Map<string, Map<number, Subdiv>>([
+      ['l1', new Map([[-3, nested], [-1, noOp]])],
+      ['l2', new Map([[0, flat], [2, nested2]])],
+      ['l3', new Map()], // no subdivided columns at all
+    ])
+
+    const v1 = {
+      version: 1,
+      name: 'Old multi-layer',
+      tempoMap: [{ pos: { col: 0, frac: { n: 0, d: 1 } }, bpm: 120 }],
+      layers: [...layerSubdivs.entries()].map(([id, subdivs], order) => ({
+        id,
+        name: id,
+        color: '#4f8cff',
+        instrumentId: 'ph-piano-1',
+        channel: order,
+        audible: true,
+        visible: true,
+        defaultVel: 96,
+        order,
+        colVel: [],
+        subdivs: [...subdivs.entries()],
+      })),
+      notes: [],
+      activeLayerId: 'l1',
+    }
+
+    const migrated = projectFromString(JSON.stringify(v1))
+    expect(migrated.version).toBe(2)
+
+    // The actual contract: every enumerated slot start of every subdivided column,
+    // migrated or not, is exactly what `slotStartsIn` reports over the new grid —
+    // not that the region list takes any particular shape.
+    for (const layer of migrated.layers) {
+      const subdivs = layerSubdivs.get(layer.id)!
+      for (const [col, sd] of subdivs) {
+        const expected = enumerateSlots(sd).map((slot) => pos(col, slot.start.n, slot.start.d))
+        const actual = slotStartsIn(layer.grid, pos(col), pos(col + 1)).filter(
+          (p) => p.col === col,
+        )
+        expect(actual, `layer ${layer.id} col ${col}`).toEqual(expected)
+      }
+    }
+  })
+
+  it('rejects a malformed v1 subdivision through validateSubdiv, naming the path', () => {
+    expectReject(
+      corruptV1((r) => (r.layers[0].subdivs[0][1] = { split: 5, children: [null, null] })),
+      /layers\[0\]\.subdivs\[2\]/,
+    )
+    expectReject(
+      corruptV1((r) => (r.layers[0].subdivs[0][1] = { split: 17 })),
+      /layers\[0\]\.subdivs\[2\]/,
+    )
+    expectReject(
+      corruptV1(
+        (r) =>
+          (r.layers[0].subdivs[0][1] = {
+            split: 1,
+            children: [{ split: 2, children: [null, null] }],
+          }),
+      ),
+      /layers\[0\]\.subdivs\[2\]/,
+    )
+  })
+
+  it('rejects a duplicate column in a v1 subdivs map', () => {
+    expectReject(
+      corruptV1((r) => (r.layers[0].subdivs[1][0] = 2)),
+      /layers\[0\]\.subdivs.*2/,
+    )
+  })
+
+  it('rejects a grid value off the lattice, naming the path', () => {
+    const bad = JSON.parse(projectToBlobString(createEmptyProject())) as Record<string, unknown>
+    ;(bad.layers as Record<string, unknown>[])[0]!.grid = [
+      { start: { col: 0, frac: { n: 0, d: 1 } }, value: { n: 1, d: 17 } },
+    ]
+    expect(() => projectFromString(JSON.stringify(bad))).toThrow(/layers\[0\]\.grid\[0\]\.value/)
+  })
+
+  it('rejects duplicate region starts', () => {
+    const bad = JSON.parse(projectToBlobString(createEmptyProject())) as Record<string, unknown>
+    ;(bad.layers as Record<string, unknown>[])[0]!.grid = [
+      { start: { col: 1, frac: { n: 0, d: 1 } }, value: { n: 1, d: 2 } },
+      { start: { col: 1, frac: { n: 0, d: 1 } }, value: { n: 1, d: 4 } },
+    ]
+    expect(() => projectFromString(JSON.stringify(bad))).toThrow(/duplicate/i)
+  })
+})
+
+describe('BoardStore.setGridRange', () => {
+  it('is one command, and undo restores the previous grid', () => {
+    const store = new BoardStore(createEmptyProject(), { width: 800, height: 600 })
+    const id = store.activeLayer().id
+    store.setGridRange(id, pos(0), pos(4), frac(1, 3))
+    expect(store.gridFor(id)).toHaveLength(2)
+    store.undo()
+    expect(store.gridFor(id)).toEqual([])
+  })
+})
+
+describe('meterMap persistence', () => {
+  it('round-trips a compound meter', () => {
+    const p = { ...createEmptyProject(), meterMap: [{ pos: pos(0), beatUnit: frac(1, 2), groups: [2, 2, 3] }] }
+    expect(projectFromString(projectToBlobString(p)).meterMap).toEqual(p.meterMap)
+  })
+
+  it('defaults to one 4/4 at the origin when absent', () => {
+    const old = JSON.parse(projectToBlobString(createEmptyProject())) as Record<string, unknown>
+    delete old.meterMap
+    expect(projectFromString(JSON.stringify(old)).meterMap).toEqual([
+      { pos: pos(0), beatUnit: frac(1), groups: [1, 1, 1, 1] },
+    ])
+  })
+
+  it('serializes identically for equal projects, so autosave does not churn', () => {
+    const a = { ...createEmptyProject(), meterMap: [{ pos: pos(0), beatUnit: frac(1, 4), groups: [2, 2] }] }
+    const b = { ...createEmptyProject(), meterMap: [{ pos: pos(0), beatUnit: frac(1, 4), groups: [2, 2] }] }
+    expect(projectToBlobString(a)).toBe(projectToBlobString(b))
+  })
+
+  it('throws at write time rather than writing a file it cannot reopen', () => {
+    // A meter that never passed through `readMeterMap` — built in-app, or handed to
+    // `serializeProject` directly — must fail loudly here, mirroring the `writeGrid`
+    // precedent above (`'throws at write time rather than writing a file it cannot
+    // reopen'`): autosave never reads its own bytes back, so an invalid meter must be
+    // caught on the way out, not discovered on the next reload.
+    const p = createEmptyProject()
+
+    const tripletBeatUnit: Project = {
+      ...p,
+      meterMap: [{ pos: pos(0), beatUnit: frac(1, 3), groups: [4] }],
+    }
+    expect(() => serializeProject(tripletBeatUnit)).toThrow(/meterMap\[0\]\.beatUnit/)
+
+    const outOfOrder: Project = {
+      ...p,
+      meterMap: [
+        { pos: pos(4), beatUnit: frac(1), groups: [4] },
+        { pos: pos(2), beatUnit: frac(1), groups: [4] },
+      ],
+    }
+    expect(() => serializeProject(outOfOrder)).toThrow(/meterMap.*not sorted into canonical order/)
+  })
+
+  it('rejects a meter whose beatUnit is not a power-of-two fraction of a quarter, naming the path', () => {
+    const bad = JSON.parse(projectToBlobString(createEmptyProject())) as Record<string, unknown>
+    bad.meterMap = [{ pos: { col: 0, frac: { n: 0, d: 1 } }, beatUnit: { n: 1, d: 3 }, groups: [4] }]
+    expect(() => projectFromString(JSON.stringify(bad))).toThrow(/meterMap\[0\]\.beatUnit/)
+  })
+
+  /*
+   * The read/write asymmetry Task 5 found for grid values, and Task 13's review found
+   * again for meters: a rule that lives only on the menu is a rule the file reader
+   * does not have. `4 / (1/512) = 2048` is a power of two, so the SMF rule passes it;
+   * 512 does not divide the §3.1 lattice, so `validateMeter` must not.
+   */
+  it('rejects a meter whose beatUnit is off the §3.1 lattice, naming the path', () => {
+    const bad = JSON.parse(projectToBlobString(createEmptyProject())) as Record<string, unknown>
+    bad.meterMap = [{ pos: { col: 0, frac: { n: 0, d: 1 } }, beatUnit: { n: 1, d: 512 }, groups: [4] }]
+    expect(() => projectFromString(JSON.stringify(bad)))
+      .toThrow(/meterMap\[0\]\.beatUnit.*lattice/)
+  })
+
+  it('rejects an out-of-order meterMap', () => {
+    const bad = JSON.parse(projectToBlobString(createEmptyProject())) as Record<string, unknown>
+    bad.meterMap = [
+      { pos: { col: 4, frac: { n: 0, d: 1 } }, beatUnit: { n: 1, d: 1 }, groups: [4] },
+      { pos: { col: 2, frac: { n: 0, d: 1 } }, beatUnit: { n: 1, d: 1 }, groups: [4] },
+    ]
+    expect(() => projectFromString(JSON.stringify(bad))).toThrow(/meterMap/)
+  })
+
+  /**
+   * The Task 11 invariant this whole read path exists to protect: a v2 file whose
+   * first `meterMap` entry starts after col 0 must load cleanly — with an implicit
+   * `DEFAULT_METER` prepended by `buildMeterMap` — rather than sit anchored wrong and
+   * throw a `RangeError` later from a draw path (`barLinesIn` et al., via
+   * `assertAnchored`). Routing the reader's parsed array through `buildMeterMap` is
+   * what makes that true.
+   */
+  it('loads a v2 file whose first meter starts after the origin, prepending the implicit 4/4', () => {
+    const raw = JSON.parse(projectToBlobString(createEmptyProject())) as Record<string, unknown>
+    raw.meterMap = [{ pos: { col: 4, frac: { n: 0, d: 1 } }, beatUnit: { n: 1, d: 2 }, groups: [3, 3] }]
+    const loaded = projectFromString(JSON.stringify(raw))
+    expect(loaded.meterMap).toEqual([
+      DEFAULT_METER,
+      { pos: pos(4), beatUnit: frac(1, 2), groups: [3, 3] },
+    ])
   })
 })
