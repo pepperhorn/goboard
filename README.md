@@ -13,8 +13,10 @@ short version.
 - **Rational time, not floats.** Positions are `{col, frac}` with exact `Frac`
   arithmetic over a fixed denominator lattice (`2^8·3^4·5^2·7^2·11^2·13^2`). Two notes
   written the same way are the same instant, forever — no epsilon comparisons, no drift.
-- **Per-layer, per-column subdivision, two levels deep.** A column can be 11 slots on
-  the drum layer and 4 on the bass, and any of those slots can split again.
+- **Per-layer grid regions, arbitrary depth.** A layer's rhythmic grid is a sorted list
+  of `{start, value}` regions — line spacing in quarter notes, anchored at its own start
+  — so the drum layer can run 11 lines/quarter while the bass runs 4, and either can
+  change line spacing anywhere along the timeline with no nesting-depth limit.
 - **Boundless board.** No song length, no bar count, negative columns included; the
   viewport culls to what is visible plus the longest note.
 - **Velocity as a first-class lane.** Layer default → column velocity → per-note
@@ -35,8 +37,8 @@ bumps a dirty flag that a single rAF loop reads. React only sees derived scalars
 ```bash
 pnpm install
 pnpm dev            # http://localhost:5173
-pnpm test           # 469 unit tests (vitest, headless)
-pnpm test:e2e       # 4 Playwright smoke flows
+pnpm test           # 625 unit tests (vitest, headless)
+pnpm test:e2e       # 6 Playwright smoke flows
 pnpm bench          # the §5.3 frame-time benchmark
 pnpm build
 ```
@@ -95,6 +97,7 @@ grows instead of re-baking every glow in the next frame.
 ## Status
 
 Milestones M1–M7 of the spec's build order are implemented: time core, board render,
-project I/O, editing, playback, velocity, instruments, persistence and export.
-Out of scope for v1: time signatures, tempo-map editing UI, multi-select, copy/paste,
-MEI export.
+project I/O, editing, playback, velocity, instruments, persistence and export. The
+subdivision tree was later replaced by per-layer grid regions, and a meter map with
+ruler markers and bar/group lines landed alongside it (go-spec.md §3.2, §3.4).
+Out of scope for v1: tempo-map editing UI, multi-select, copy/paste, MEI export.

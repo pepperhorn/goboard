@@ -354,7 +354,7 @@ phase, slot enumeration including clipped partials, cursor monotonicity, meter �
 positions, board-space mapping, the off-grid predicate, and a property test that the v1→v2
 converter preserves enumerated slots exactly across a random corpus of v1 projects.
 
-**Smoke** (Playwright): the four existing flows run against the 3D board, plus one that
+**Smoke** (Playwright): the six existing flows run against the 3D board, plus one that
 forces WebGL to fail and asserts the 2D fallback renders. No golden images — WebGL
 rasterizes differently per driver — but an assertion that stones land within a pixel or two
 of where `layout.ts` says they should.
