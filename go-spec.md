@@ -227,7 +227,7 @@ type Viewport = { xQuarters: number; yPitch: number; pxPerQuarter: number; pxPer
 ### 5.2 Draw pass (per dirty frame)
 
 1. Row shading — white-key rows `#f7f5f0`-ish, black-key rows a few % darker; row for C rows gets a faint label (`C3`, `C4`…) in the left gutter.
-2. Column gridlines — quarter lines; heavier every 4th; **grid lines for the active layer only** (other layers' grids would be noise).
+2. Column gridlines — three weights: heavy bar lines and medium group (felt-beat) lines, both from the meter map (§3.7), and thin intersection lines from the active layer's grid regions (§3.2); **grid lines for the active layer only** (other layers' grids would be noise).
 3. Stones — for each visible layer in `order`, then active layer last: circle of radius `min(pxPerSemitone, slotWidth) * 0.42`, filled white or black by pitch class `{0,2,4,5,7,9,11}` → white; ring stroke in `layer.color` (2px, full alpha for active layer). Duration beyond one slot renders as a rounded lozenge (stone stretched horizontally to `dur` width).
 4. Playhead — vertical line, position from `secondsToPos` inverse lookup during playback.
 5. Left gutter (pitch labels / drum labels §9.3) and velocity lane (§6.2) are separate canvases stacked in the React layout so they can stay pinned while the board pans.
@@ -285,7 +285,7 @@ Column-level velocity is **time-linear per layer**: all notes in a column stack 
 
 ### 7.1 The ruler
 
-§5.2's draw pass gains a **ruler strip** pinned above the board, horizontally locked to the board's pan/zoom. It is a single surface — column numbers, the loop region, and the playhead handle — and it owns every gesture in the "ruler" rows below. There is no separate "column header".
+§5.2's draw pass gains a **ruler strip** pinned above the board, horizontally locked to the board's pan/zoom. It is a single surface — bar numbers (labelled only at bar starts, from 1 at the anchor, never non-positive), the loop region, and the playhead handle — and it owns every gesture in the "ruler" rows below. There is no separate "column header".
 
 ### 7.2 Gestures
 

@@ -1,7 +1,6 @@
 import type { Layer, LayerId, Note } from '../core/types'
 import { toNumber } from '../core/frac'
 import type { GridRegion } from '../core/grid'
-import { isOnGrid } from '../core/grid'
 import type { GridCursor } from '../core/gridCursor'
 import { createGridCursor } from '../core/gridCursor'
 import { eq as posEq } from '../core/pos'
@@ -35,15 +34,6 @@ export type StoneContext = {
 export function slotWidthFor(vp: Viewport, cursor: GridCursor, note: Note): number {
   const slot = cursor.slotAt(note.pos)
   return quartersToWidth(vp, toNumber(slot.dur))
-}
-
-/**
- * A note is off-grid when its onset is not a slot start of its layer's current grid
- * — legal by design, since editing the grid re-quantizes nothing (§7). It draws with
- * a muted ring to flag that.
- */
-export function isOffGrid(regions: readonly GridRegion[], note: Note): boolean {
-  return !isOnGrid(regions, note.pos)
 }
 
 /** Mix a layer color toward the board, for the off-grid flag. */
@@ -111,9 +101,10 @@ export function drawStones(
       // Vertical cull: `queryRange` is keyed by column, so without this every note in
       // a visible column is rasterized even when its row is far off screen.
       if (cy + radius < y0 || cy - radius > y1) continue
-      // Off-grid iff the note's own onset isn't the slot start the cursor just
-      // resolved — reusing that slot rather than calling `isOffGrid` here, which
-      // would re-run `regionIndexAt` per note and defeat the cursor (§3.6).
+      // Off-grid (§7) iff the note's own onset isn't the slot start the cursor just
+      // resolved — reusing that slot rather than a standalone `isOnGrid` lookup, which
+      // would re-run `regionIndexAt` per note and defeat the cursor (§3.6). This is the
+      // one and only off-grid predicate; nothing else in the codebase duplicates it.
       const offGrid = !posEq(slot.start, note.pos)
       const color = offGrid ? mutedColor(layer.color) : layer.color
       drawStone(

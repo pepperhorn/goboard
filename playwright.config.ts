@@ -1,8 +1,8 @@
 import { defineConfig, devices } from '@playwright/test'
 
 /**
- * Smoke coverage only — §12: "Playwright covers two or three smoke flows only,
- * everything else above is headless." The unit suite owns behaviour; these tests
+ * Smoke coverage only — §12: "Playwright covers six smoke flows — everything else
+ * above is headless." The unit suite owns behaviour; these tests
  * exist to catch the failures a headless suite structurally cannot see: the app
  * not booting, the canvases not sizing, a download never firing.
  *
