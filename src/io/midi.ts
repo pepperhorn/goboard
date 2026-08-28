@@ -2,6 +2,7 @@ import { Midi } from '@tonejs/midi'
 import type { Layer, Note, Pos, Project } from '../core/types'
 import { gcd, lcm } from '../core/frac'
 import { add as posAdd } from '../core/pos'
+import { buildMeterMap, midiDenominator } from '../core/meter'
 import { effectiveVelocity } from '../audio/scheduler'
 import type { InstrumentManifest } from '../audio/manifest'
 import { isKit } from '../audio/manifest'
@@ -83,6 +84,10 @@ export type MidiExportOptions = {
  * The ends matter independently. A note at 1/3 lasting 1/4 ends at 7/12, and a PPQ
  * exact for both 3 and 4 is exact for 12 anyway — but the lcm is taken over the ends
  * too, because `dur` alone cannot show that a *tempo* landed mid-note.
+ *
+ * Meter positions count for the same reason tempo positions do: a time-signature event
+ * at `pos(4, 1, 3)` that is not fed into this lcm would round to the nearest tick while
+ * the notes around it stay exact, and the events would drift apart.
  */
 function denominators(project: Project): number[] {
   const ds: number[] = [1]
@@ -90,6 +95,7 @@ function denominators(project: Project): number[] {
     ds.push(note.pos.frac.d, note.dur.d, posAdd(note.pos, note.dur).frac.d)
   }
   for (const t of project.tempoMap) ds.push(t.pos.frac.d)
+  for (const m of project.meterMap) ds.push(m.pos.frac.d)
   return ds
 }
 
@@ -230,9 +236,22 @@ export function exportMidi(project: Project, options: MidiExportOptions = {}): U
       ticks: tickOf(t.pos, ppq),
       bpm: Math.max(MIDI_MIN_BPM, t.bpm),
     })),
-    // v1 has no meter (§11), and an empty array here would leave the file without the
-    // 4/4 default every DAW assumes anyway. Writing it explicitly costs one event.
-    timeSignatures: [{ ticks: 0, timeSignature: [4, 4] }],
+    // The meter map (§3.7) becomes one time-signature event per entry: numerator is
+    // `sum(groups)`, denominator is `midiDenominator(beatUnit)` (SMF's denominator is a
+    // 2^k field, which is exactly what `beatUnit`'s own restriction guarantees). A 7/8
+    // meter felt as [2,2,3] exports as plain 7/8 — grouping has no representation in
+    // SMF and is lost at this boundary; it survives only in `.go.json`.
+    //
+    // `buildMeterMap` runs the raw `meterMap` through the same anchoring it applies on
+    // load, rather than trusting the field as-is: `exportMidi` can be handed a
+    // `Project` assembled by hand (tests, or any future caller) that never passed
+    // through the file reader, and an empty or non-anchored `meterMap` must still
+    // produce a time-signature event at tick 0 — a file without one leaves every DAW
+    // assuming 4/4, which is what the old hardcoded array was protecting against.
+    timeSignatures: buildMeterMap(project.meterMap).map((m) => ({
+      ticks: tickOf(m.pos, ppq),
+      timeSignature: [m.groups.reduce((a, b) => a + b, 0), midiDenominator(m.beatUnit)],
+    })),
     keySignatures: [],
   })
 

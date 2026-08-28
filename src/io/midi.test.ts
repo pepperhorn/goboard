@@ -296,6 +296,32 @@ describe('exportMidi', () => {
   })
 })
 
+describe('time signatures (design §3.7)', () => {
+  it('writes one event per meter change', () => {
+    const p = project({
+      meterMap: [
+        { pos: pos(0), beatUnit: frac(1), groups: [1, 1, 1, 1] },
+        { pos: pos(8), beatUnit: frac(1, 2), groups: [2, 2, 3] },
+      ],
+    })
+    const midi = new Midi(exportMidi(p, { ppq: 480 }))
+    expect(midi.header.timeSignatures.map((t) => [t.ticks, ...t.timeSignature])).toEqual([
+      [0, 4, 4],
+      [3840, 7, 8],
+    ])
+  })
+
+  it('feeds meter positions into the PPQ lcm', () => {
+    const p = project({
+      meterMap: [
+        { pos: pos(0), beatUnit: frac(1), groups: [1, 1, 1, 1] },
+        { pos: pos(4, 1, 3), beatUnit: frac(1, 2), groups: [3, 3] },
+      ],
+    })
+    expect(chooseTicksPerQuarter(p).lcm % 3).toBe(0)
+  })
+})
+
 describe('midiFileName', () => {
   it('strips path-hostile characters and falls back to Untitled', () => {
     expect(midiFileName(project({ name: 'My Piece' }))).toBe('My Piece.mid')
