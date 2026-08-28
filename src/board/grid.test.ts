@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { frac } from '../core/frac'
 import type { GridRegion } from '../core/grid'
 import type { Meter } from '../core/meter'
+import { DEFAULT_METER } from '../core/meter'
 import { pos } from '../core/pos'
 import { barLineXs, drawGridlines, gridlineXs, groupLineXs } from './grid'
 
@@ -22,6 +23,30 @@ describe('gridlineXs', () => {
   it('drops lines closer together than 4px, per §5.3 guard 6', () => {
     const dense = [{ start: pos(0), value: frac(1, 32) }] // 3px at this zoom
     expect(gridlineXs(vp, size, dense)).toEqual([0, 96, 192, 288, 384])
+  })
+
+  // --- §5.3 guard 6's other half: sub-quarter lines below 48 px/quarter -----------
+
+  it('falls back to the quarter stride for a sub-quarter region below 48 px/quarter', () => {
+    const zoomedOut = { ...vp, pxPerQuarter: 40 } // between 24 and 48
+    // A 1/8 region lands 5px apart at this zoom — not caught by the 4px guard above,
+    // but still illegibly dense per the *other* guard 6 condition (§5.3).
+    const fine: GridRegion[] = [{ start: pos(0), value: frac(1, 8) }]
+    const quarterOnly: GridRegion[] = [{ start: pos(0), value: frac(1) }]
+    expect(gridlineXs(zoomedOut, size, fine)).toEqual(gridlineXs(zoomedOut, size, quarterOnly))
+  })
+
+  it('leaves a sub-quarter region alone once zoomed in to 48 px/quarter or past it', () => {
+    const zoomedIn = { ...vp, pxPerQuarter: 48 }
+    const fine: GridRegion[] = [{ start: pos(0), value: frac(1, 8) }]
+    const quarterOnly: GridRegion[] = [{ start: pos(0), value: frac(1) }]
+    expect(gridlineXs(zoomedIn, size, fine)).not.toEqual(gridlineXs(zoomedIn, size, quarterOnly))
+  })
+
+  it('never gates a region at or coarser than a quarter, regardless of zoom', () => {
+    const zoomedOut = { ...vp, pxPerQuarter: 40 }
+    const coarse: GridRegion[] = [{ start: pos(0), value: frac(2) }]
+    expect(gridlineXs(zoomedOut, size, coarse)).toEqual([0, 80, 160, 240, 320, 400])
   })
 })
 
@@ -67,12 +92,16 @@ const stubCtx = (): CanvasRenderingContext2D =>
   }) as unknown as CanvasRenderingContext2D
 
 /** Run one `drawGridlines` frame and hand back the three weight paths, in construction order. */
-function paintGridlines(regions: readonly GridRegion[], meterMap: readonly Meter[]) {
+function paintGridlines(
+  regions: readonly GridRegion[],
+  meterMap: readonly Meter[],
+  viewport: typeof vp = vp,
+) {
   const prev = (globalThis as { Path2D?: unknown }).Path2D
   ;(globalThis as { Path2D?: unknown }).Path2D = RecordingPath
   RecordingPath.made = []
   try {
-    drawGridlines(stubCtx(), vp, size, regions, meterMap, 1)
+    drawGridlines(stubCtx(), viewport, size, regions, meterMap, 1)
     // Construction order inside `drawGridlines`: bars, groups, intersections.
     return {
       bars: RecordingPath.made[0]!,
@@ -112,5 +141,18 @@ describe('drawGridlines', () => {
     expect(groups.xs).toEqual(groupLineXs(vp, size, meter).map(crisp1))
     // Every other eighth-note slot in [0, 4] quarters, minus the bar and group lines.
     expect(intersections.xs).toEqual([48, 96, 192, 240, 336, 384].map(crisp1))
+  })
+
+  it('drops a sub-quarter region below 48 px/quarter, leaving the meter\'s bar/group lines intact', () => {
+    const zoomedOut = { ...vp, pxPerQuarter: 40 } // between 24 and 48
+    // A 1/8 region lands 5px apart at this zoom — the reproduction in the review that
+    // caught this. Under DEFAULT_METER (plain 4/4), the quarter-stride fallback lands
+    // exactly on the meter's own bar/group lines, so nothing is left over to draw as
+    // an intersection.
+    const fine: GridRegion[] = [{ start: pos(0), value: frac(1, 8) }]
+    const { bars, groups, intersections } = paintGridlines(fine, [DEFAULT_METER], zoomedOut)
+    expect(intersections.xs).toEqual([])
+    expect(bars.xs.length).toBeGreaterThan(0)
+    expect(groups.xs.length).toBeGreaterThan(0)
   })
 })

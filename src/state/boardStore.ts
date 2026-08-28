@@ -7,7 +7,7 @@ import { buildTempoMap } from '../core/tempo'
 import type { TempoMap } from '../core/tempo'
 import type { Meter } from '../core/meter'
 import { buildMeterMap, validateMeter } from '../core/meter'
-import { ORIGIN, cmp as posCmp, eq as posEq } from '../core/pos'
+import { ORIGIN, cmp as posCmp, eq as posEq, key as posKey } from '../core/pos'
 import type { GridRegion, GridSlot } from '../core/grid'
 import { setGridRange as computeGridRange, slotAt as slotAtGrid } from '../core/grid'
 import { initialViewport } from '../board/viewport'
@@ -384,9 +384,22 @@ export class BoardStore {
    * The validator is deliberately the *same* function the file reader calls
    * (`readMeterMap`, `project.ts`): a rule enforced only here would be a rule a
    * hand-edited `.go.json` could walk straight past.
+   *
+   * **A position before the origin is refused**, the same invariant `moveMeter`
+   * enforces for a later meter. Exactly the origin is still allowed — that's how a
+   * caller restates the anchor meter itself (see the test of that name) — but a
+   * negative column would become the new `map[0]` once `buildMeterMap` sorts it in,
+   * silently exiling the *real* anchor to index 1. From there `removeMeter(0)` and
+   * `moveMeter(0, …)` both refuse it (by design — see `moveMeter`), `GridMenu` hides
+   * the Remove button for it, and the only way out is undo. Ruler columns left of the
+   * origin are reachable by panning, so this is reachable in the running app, not just
+   * in theory.
    */
   setMeter(meter: Meter): void {
     const m = validateMeter(meter, 'meter')
+    if (posCmp(m.pos, ORIGIN) < 0) {
+      throw new RangeError(`meter.pos: must not be before the origin, got ${posKey(m.pos)}`)
+    }
     const prev = this.meter
     const next = this.meterMapWith(m)
     this.run({

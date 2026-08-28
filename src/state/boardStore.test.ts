@@ -93,6 +93,29 @@ describe('BoardStore.setMeter', () => {
     expect(b.getMeterMap()).toHaveLength(1)
     expect(b.commitVersion).toBe(0)
   })
+
+  /*
+   * Reproduction from the whole-branch review: pan left, right-click the ruler at
+   * column -3, pick 3/4. Before this test, `setMeter` had no floor at the origin
+   * (unlike `moveMeter`, which already refused `to <= ORIGIN`), so the new meter
+   * became `buildMeterMap`'s sorted `map[0]` — silently exiling the real anchor to
+   * index 1. From there `removeMeter(0)` and `moveMeter(0, …)` both refuse it (by
+   * design), `GridMenu` hides the Remove button for it, and undo was the only way out.
+   */
+  it('refuses a position before the origin, which would exile the real anchor', () => {
+    const b = store()
+    const before = b.getMeterMap()
+    expect(() => b.setMeter({ pos: pos(-3), beatUnit: frac(1), groups: [3] }))
+      .toThrow(/meter\.pos/)
+    expect(b.getMeterMap()).toBe(before)
+    expect(b.commitVersion).toBe(0)
+  })
+
+  it('still allows restating the anchor exactly at the origin', () => {
+    const b = store()
+    expect(() => b.setMeter({ pos: pos(0), beatUnit: frac(1), groups: [3] })).not.toThrow()
+    expect(b.getMeterMap()).toHaveLength(1)
+  })
 })
 
 describe('BoardStore.moveMeter', () => {

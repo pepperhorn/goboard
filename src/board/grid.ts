@@ -26,6 +26,14 @@ const crisp = (v: number, dpr: number): number => Math.round(v * dpr) / dpr + 0.
 const MIN_LINE_PX = 4
 
 /**
+ * Below this zoom, a region finer than a quarter note falls back to the quarter
+ * stride instead of drawing its own (illegibly dense) lines (§5.3 guard 6, first of
+ * the two guards). A region at or coarser than a quarter is never subject to this —
+ * only genuine *subdivision* lines are.
+ */
+const MIN_PX_PER_QUARTER_FOR_SUBDIVISION = 48
+
+/**
  * The quarter-note stride, doubled as many times as it takes to clear `MIN_LINE_PX`
  * at this zoom. `pxPerQuarter` is at least `MIN_PX_PER_QUARTER` (24) in practice, so
  * this loop never actually iterates — it exists for the theoretical case where it
@@ -40,16 +48,27 @@ function coarseQuarterStride(vp: Viewport): Frac {
 }
 
 /**
- * The regions actually used to draw: a region whose own line spacing would land
- * closer than `MIN_LINE_PX` apart contributes none of its own lines — it falls back
- * to the (possibly further-coarsened) quarter stride over its span instead (§5.3
- * guard 6, ruling F2). A region coarser than a quarter is left alone: its own,
- * sparser intersections are what should be drawn, not a union with the quarter grid.
+ * The regions actually used to draw. A region's own lines are replaced by the
+ * (possibly further-coarsened) quarter stride over its span — never omitted outright,
+ * since bar/group lines aside, *some* intersection grid must still read at any zoom —
+ * whenever either §5.3 guard 6 condition holds:
+ *
+ * 1. The region is finer than a quarter note and `pxPerQuarter` is below
+ *    `MIN_PX_PER_QUARTER_FOR_SUBDIVISION` (48) — subdivision lines are suppressed
+ *    when too zoomed out to read, regardless of how far apart they'd actually land.
+ * 2. The region's own line spacing would land closer than `MIN_LINE_PX` (4px) apart —
+ *    unreadable at any zoom, coarse regions included.
+ *
+ * A region coarser than a quarter is otherwise left alone: its own, sparser
+ * intersections are what should be drawn, not a union with the quarter grid.
  */
 function effectiveRegions(vp: Viewport, regions: readonly GridRegion[]): readonly GridRegion[] {
   let fallback: Frac | undefined
   return regions.map((region) => {
-    if (fracToNumber(region.value) * vp.pxPerQuarter >= MIN_LINE_PX) return region
+    const ownValue = fracToNumber(region.value)
+    const tooFineForZoom = ownValue < 1 && vp.pxPerQuarter < MIN_PX_PER_QUARTER_FOR_SUBDIVISION
+    const tooDenseToRead = ownValue * vp.pxPerQuarter < MIN_LINE_PX
+    if (!tooFineForZoom && !tooDenseToRead) return region
     fallback ??= coarseQuarterStride(vp)
     return { start: region.start, value: fallback }
   })
